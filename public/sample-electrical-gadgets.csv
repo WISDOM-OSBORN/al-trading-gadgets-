@@ -1,0 +1,51 @@
+sku,name,category,brand,cost_price,selling_price,quantity,reorder_level,barcode,supplier,description
+CHG-20W-ANK,Anker 20W USB-C Nano PowerPort Adapter,Chargers & Adapters,Anker,8.50,15.00,45,10,848061023451,Apex Tech Distro,Ultra-compact USB-C fast charger for iPhone and Android
+CHG-65W-GAN,Baseus 65W GaN3 Pro Triple Port Fast Charger,Chargers & Adapters,Baseus,22.00,38.00,28,5,848061023452,Apex Tech Distro,2x Type-C + 1x USB-A fast charging for laptops and phones
+CHG-SAM-25W,Samsung 25W Super Fast Wall Charger (Type-C),Chargers & Adapters,Samsung,11.00,20.00,35,8,880609054321,ElectroDirect Ltd,Original Super Fast Charging EP-TA800 for Galaxy devices
+CHG-CAR-38W,Ugreen 38W Dual Port Car Fast Charger (PD+QC3.0),Chargers & Adapters,Ugreen,6.50,13.00,18,5,693417772301,AutoGadgets Global,Metal cigarette lighter adapter with LED ring indicator
+CHG-WL-15W,Joyroom 15W Qi Magnetic Wireless Charging Pad,Chargers & Adapters,Joyroom,9.00,18.00,14,4,693417772302,Apex Tech Distro,MagSafe compatible slim charging puck with braided cable
+CAB-TC-1M,Braided Type-C to Type-C 60W Cable (1 Meter),Cables & Leads,Oraimo,2.20,5.50,80,15,693417770101,Transsion Acc Ltd,Heavy duty nylon braided PD charging cord
+CAB-LGT-1M,MFi Certified Lightning to USB-A Cable (1m),Cables & Leads,Anker,4.50,10.00,65,12,693417770102,Apex Tech Distro,Durable sync & charge lightning cable for iPhone/iPad
+CAB-LGT-TC2M,Type-C to Lightning 20W Fast Charging Cable (2m),Cables & Leads,Baseus,3.80,8.50,40,10,693417770103,Apex Tech Distro,Extra long 2-meter nylon cord with velcro strap
+CAB-3IN1-UNIV,3-in-1 Universal Cable (Lightning + Type-C + Micro),Cables & Leads,Remax,3.00,7.00,55,10,693417770104,ElectroDirect Ltd,Multi-port charging wire suitable for any device
+CAB-HDMI-4K-2M,High-Speed HDMI 2.0 4K Cable 60Hz (2m),Cables & Leads,Ugreen,4.00,9.00,25,5,693417770105,ElectroDirect Ltd,"Gold-plated connectors, braided shielding for TV and consoles"
+CAB-AUX-1M,3.5mm Male-to-Male Audio Aux Cable (1.2m),Cables & Leads,Vention,1.50,4.00,32,6,693417770106,Apex Tech Distro,Oxygen-free copper cable for car audio and speakers
+PB-10000-ORA,"Oraimo 10,000mAh Toast 10 Ultra-Slim Power Bank",Power Banks,Oraimo,10.50,20.00,34,8,489518074901,Transsion Acc Ltd,Dual output with LED power display and AniFast charging
+PB-20000-ANK,"Anker PowerCore 20,000mAh High Capacity Battery",Power Banks,Anker,26.00,48.00,20,5,489518074902,Apex Tech Distro,Massive capacity battery pack charges iPhone up to 5 times
+PB-30000-BAS,"Baseus 30,000mAh 65W Power Bank with Digital Display",Power Banks,Baseus,38.00,68.00,12,3,489518074903,Apex Tech Distro,High power bank capable of charging MacBooks and laptops
+PB-MAG-5000,"Magnetic Wireless Power Bank 5,000mAh for MagSafe",Power Banks,Joyroom,14.00,28.00,16,4,489518074904,Apex Tech Distro,"Snaps directly to back of phone, slim and lightweight"
+EXT-4WAY-2M,Schneider 4-Gang Surge Protected Extension Socket (2m),Extension Sockets,Schneider,12.00,22.00,22,6,501234567891,VoltMaster Electricals,"Heavy duty surge suppression, neon switches per socket"
+EXT-6WAY-USB,Lencent 6-Way Power Strip with 4 USB Ports (3m),Extension Sockets,Lencent,16.50,30.00,19,5,501234567892,VoltMaster Electricals,Integrated 3.4A smart USB charging hubs and safety shutters
+EXT-TOWER-12W,Vertical Power Strip Tower 12 Outlets + 5 USB Ports,Extension Sockets,Huntkey,24.00,45.00,8,3,501234567893,VoltMaster Electricals,Space saving vertical surge tower with overload circuit breaker
+EXT-REEL-25M,Masterplug 25m Heavy Duty Cable Reel 4 Sockets,Extension Sockets,Masterplug,32.00,58.00,6,2,501234567894,VoltMaster Electricals,Industrial drum cable reel with thermal cutout protection
+EXT-ADPT-MULTI,Universal Multi-Plug Travel Adapter with 2 USB,Extension Sockets,Brennenstuhl,5.00,11.00,42,8,501234567895,VoltMaster Electricals,"Converts UK, US, EU, AU plugs with safety fuse"
+BLB-LED-9W-E27,Philips 9W Warm White LED Bulb E27 Screw (Pack of 2),Lighting & Bulbs,Philips,3.50,7.50,50,12,871869970001,Lumen Electricals,"A60 shape, 806 lumens, 15,000 hours rated life"
+BLB-LED-15W-B22,Philips 15W Cool Daylight LED Bulb B22 Bayonet,Lighting & Bulbs,Philips,4.20,8.50,36,8,871869970002,Lumen Electricals,High brightness 1400 lumens energy saving bulb
+BLB-SMART-RGB,Tuya Smart WiFi RGB+W 10W Bulb (Works with Alexa),Lighting & Bulbs,Tuya,6.00,13.00,24,5,871869970003,Apex Tech Distro,"16 Million colors, smartphone app control and voice command"
+BLB-EMERG-12W,Rechargeable Emergency Inverter LED Bulb 12W,Lighting & Bulbs,Orient,5.50,12.00,30,8,871869970004,Lumen Electricals,Built-in lithium battery stays on for 4 hours during power blackout
+LGT-SOLAR-FL,Solar Flood Light 60W with Motion Sensor & Remote,Lighting & Bulbs,Solavolt,22.00,42.00,11,3,871869970005,Lumen Electricals,IP66 waterproof outdoor security light with solar panel
+LGT-DESK-LED,Rechargeable Folding LED Desk Lamp with Touch Dimmer,Lighting & Bulbs,Remax,7.50,16.00,15,4,871869970006,ElectroDirect Ltd,"3 color temperatures, eye protection filter, USB rechargeable"
+EAR-BT-ORA,Oraimo FreePods 4 Active Noise Cancelling TWS,Audio & Earphones,Oraimo,19.00,35.00,26,6,489518074001,Transsion Acc Ltd,"ANC wireless earbuds, transparency mode, 35.5 hour playtime"
+EAR-BT-ANK,Soundcore by Anker Life P2 Mini Wireless Earbuds,Audio & Earphones,Soundcore,21.00,39.00,17,4,489518074002,Apex Tech Distro,"Big bass, 3 EQ modes, pocket size case, IPX5 waterproof"
+EAR-WIRE-35MM,JBL C100SI In-Ear Headphones with Microphone (3.5mm),Audio & Earphones,JBL,5.00,11.00,38,8,489518074003,ElectroDirect Ltd,"Signature bass sound, one-button universal inline remote"
+EAR-WIRE-TC,Digital Type-C In-Ear Earphones with DAC Chip,Audio & Earphones,Samsung,6.50,14.00,22,5,489518074004,ElectroDirect Ltd,Direct USB-C digital audio compatible with iPhone 15 & Galaxy
+SPK-BT-MINI,Zealot S32 Portable Waterproof Bluetooth Speaker 5W,Audio & Earphones,Zealot,9.00,18.00,19,5,489518074005,Apex Tech Distro,"Compact cylindrical speaker with TF card, FM radio, and lanyard"
+BAT-AA-4PK,Duracell Ultra Alkaline AA Batteries (Pack of 4),Batteries & Cells,Duracell,2.80,5.50,90,20,500039401201,VoltMaster Electricals,Long-lasting alkaline power with Powercheck gauge
+BAT-AAA-4PK,Duracell Ultra Alkaline AAA Batteries (Pack of 4),Batteries & Cells,Duracell,2.80,5.50,75,15,500039401202,VoltMaster Electricals,"Ideal for remotes, toys, thermometers, and medical devices"
+BAT-9V-ENERG,Energizer Max 9V Block Battery (1 Pack),Batteries & Cells,Energizer,2.20,4.50,28,6,500039401203,VoltMaster Electricals,Reliable power for smoke detectors and digital multimeters
+BAT-CR2032-5PK,Panasonic CR2032 3V Lithium Coin Cell (5-Pack),Batteries & Cells,Panasonic,2.00,4.50,45,10,500039401204,VoltMaster Electricals,"Standard button cells for car keys, watches, and scales"
+BAT-18650-RECH,Li-ion 18650 3.7V 2600mAh Rechargeable Battery Cell,Batteries & Cells,Sony/Murata,3.50,7.50,32,8,500039401205,ElectroDirect Ltd,"High drain cell for rechargeable torches, laser pointers, and vapes"
+SW-1G-1W,MK Logic Plus 1-Gang 1-Way Light Switch (White),Switches & Sockets,MK Electric,1.80,4.00,48,10,502123400101,VoltMaster Electricals,Antibacterial plate switch with top access screws
+SW-2G-2W,MK Logic Plus 2-Gang 2-Way Light Switch (White),Switches & Sockets,MK Electric,2.90,6.00,35,8,502123400102,VoltMaster Electricals,Dual rocker switches for staircase and hallway wiring
+SCK-13A-DP,British General 13A Double Switched Wall Socket,Switches & Sockets,BG Electrical,3.80,8.00,40,10,502123400103,VoltMaster Electricals,Twin 13A switched outlet socket with dual earth terminals
+SCK-13A-USB,BG Electrical 13A Double Socket with Integrated USB-A/C,Switches & Sockets,BG Electrical,9.50,19.00,20,5,502123400104,VoltMaster Electricals,Flush wall socket with 3.1A fast USB charging built-in
+SW-ISO-45A,45A DP Cooker / Water Heater Switch with Neon,Switches & Sockets,Schneider,6.00,13.00,14,4,502123400105,VoltMaster Electricals,Heavy appliance isolating switch with red mechanical indicator
+TOOL-DMM-PRO,Uni-T UT33D+ Digital Multimeter with NCV Tester,Tools & Testers,Uni-T,11.50,22.00,12,3,690123456001,ToolCraft Pro,"Measures AC/DC voltage, DC current, resistance, diode test"
+TOOL-TEST-PEN,Non-Contact AC Voltage Detector Pen (90V-1000V),Tools & Testers,Total,3.20,7.00,25,6,690123456002,ToolCraft Pro,Audible beeper and flashing red tip for checking live wires
+TOOL-STRIP-AUTO,Automatic Wire Stripper and Crimper Tool (8-Inch),Tools & Testers,Ingco,6.50,14.00,16,4,690123456003,ToolCraft Pro,Self-adjusting jaw for 10-24 AWG wire stripping and cutting
+TOOL-TAPE-PVC,PVC Electrical Insulation Tape (Pack of 5 Colors),Tools & Testers,3M / Temflex,1.80,4.00,60,15,690123456004,VoltMaster Electricals,"Flame retardant electrical tape (Black, Red, Blue, Yellow, Green)"
+TOOL-SOLD-60W,Adjustable Temperature Soldering Iron Kit 60W,Tools & Testers,Kaisi,8.00,17.00,10,3,690123456005,ToolCraft Pro,"Includes 5 interchangeable tips, stand, and solder wire spool"
+GAD-HUB-TC7,"USB-C 7-in-1 Multifunction Hub Adapter (HDMI 4K, SD, USB 3.0)",Smart Gadgets & PC,Ugreen,18.00,35.00,14,4,697123456001,Apex Tech Distro,Aluminum hub with 100W PD pass-through for laptops and tablets
+GAD-MOUSE-WL,Logitech M185 Wireless Silent Optical Mouse,Smart Gadgets & PC,Logitech,8.50,16.00,22,5,697123456002,ElectroDirect Ltd,"2.4GHz plug-and-play USB nano receiver, 12-month battery life"
+GAD-WIFI-REP,TP-Link TL-WA850RE 300Mbps Universal Wi-Fi Range Extender,Smart Gadgets & PC,TP-Link,14.00,26.00,12,3,697123456003,ElectroDirect Ltd,Wall-mounted booster with ethernet port and signal strength LEDs
+GAD-SMART-PLUG,Sonoff S26 Smart WiFi Socket with Timer & Power Monitor,Smart Gadgets & PC,Sonoff,7.00,15.00,18,4,697123456004,Apex Tech Distro,"App remote control, schedule automation, energy usage tracking"

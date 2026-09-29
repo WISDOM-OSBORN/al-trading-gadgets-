@@ -1,0 +1,72 @@
+{
+  "entities": {
+    "Shop": {
+      "title": "Shop",
+      "description": "Store profile and settings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "currency": { "type": "string" },
+        "currencySymbol": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "taxRate": { "type": "number" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "name", "currency"]
+    },
+    "Item": {
+      "title": "Item",
+      "description": "Electrical gadget product in catalog",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shopId": { "type": "string" },
+        "sku": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "brand": { "type": "string" },
+        "costPrice": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "quantity": { "type": "number" },
+        "reorderLevel": { "type": "number" },
+        "archived": { "type": "boolean" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "shopId", "sku", "name", "sellingPrice", "quantity"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "Recorded customer sales transaction",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "invoiceNo": { "type": "string" },
+        "shopId": { "type": "string" },
+        "sellerId": { "type": "string" },
+        "sellerName": { "type": "string" },
+        "total": { "type": "number" },
+        "status": { "type": "string" },
+        "createdAtClient": { "type": "number" },
+        "deviceCode": { "type": "string" }
+      },
+      "required": ["id", "invoiceNo", "shopId", "sellerId", "total", "createdAtClient"]
+    }
+  },
+  "firestore": {
+    "/shops/{shopId}": {
+      "schema": "Shop",
+      "description": "Stores shop profile and policies"
+    },
+    "/items/{itemId}": {
+      "schema": "Item",
+      "description": "Shop inventory items catalog"
+    },
+    "/sales/{saleId}": {
+      "schema": "Sale",
+      "description": "Recorded sales transaction ledger"
+    }
+  }
+}

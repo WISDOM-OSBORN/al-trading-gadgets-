@@ -1,0 +1,180 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { useAuth } from '../../context/AuthContext';
+import { Sale } from '../../types';
+import { db } from '../../db';
+import { formatCurrency, formatDateTime } from '../../utils/formatters';
+import { downloadCSV } from '../../utils/csv';
+import Papa from 'papaparse';
+import {
+  FileSpreadsheet,
+  Download,
+  Calendar,
+  DollarSign,
+  Boxes,
+  Users,
+  TrendingUp,
+} from 'lucide-react';
+
+export const ReportsScreen: React.FC = () => {
+  const { currentShop } = useAuth();
+  const [selectedDate, setSelectedDate] = useState<string>(
+    new Date().toISOString().slice(0, 10)
+  );
+  const [sales, setSales] = useState<Sale[]>([]);
+
+  const loadData = async () => {
+    if (!currentShop) return;
+    const allSales = await db.sales
+      .where('shopId')
+      .equals(currentShop.id)
+      .toArray();
+    setSales(allSales.filter((s) => s.status !== 'voided'));
+  };
+
+  useEffect(() => {
+    loadData();
+  }, [currentShop]);
+
+  // Filter sales for the selected date
+  const daySales = useMemo(() => {
+    return sales.filter((s) => {
+      const dStr = new Date(s.createdAtClient).toISOString().slice(0, 10);
+      return dStr === selectedDate;
+    });
+  }, [sales, selectedDate]);
+
+  // Aggregate stats for the day
+  const totalRevenue = daySales.reduce((sum, s) => sum + s.total, 0);
+  const totalSalesCount = daySales.length;
+  const totalUnitsSold = daySales.reduce((sum, s) => {
+    return sum + s.lines.reduce((lSum, l) => lSum + l.qty, 0);
+  }, 0);
+  const avgSale = totalSalesCount > 0 ? totalRevenue / totalSalesCount : 0;
+
+  // Export Daily Sales CSV
+  const handleExportDailySales = () => {
+    const exportData = daySales.map((s) => ({
+      invoice_no: s.invoiceNo,
+      time_sold: formatDateTime(s.createdAtClient),
+      cashier: s.sellerName,
+      items: s.lines.map((l) => `${l.qty}x ${l.name}`).join('; '),
+      units_sold: s.lines.reduce((sum, l) => sum + l.qty, 0),
+      total_amount: s.total.toFixed(2),
+      device_code: s.deviceCode,
+    }));
+
+    const csv = Papa.unparse(exportData);
+    downloadCSV(csv, `sales-report-${selectedDate}.csv`);
+  };
+
+  return (
+    <div className="pb-24 pt-1 max-w-4xl mx-auto px-2 sm:px-4 space-y-3">
+      {/* Top Header */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-3 sm:p-4 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h1 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+            <FileSpreadsheet className="w-5 h-5 text-indigo-600" />
+            <span>Daily Sales & Inventory Deduction Reports</span>
+          </h1>
+          <p className="text-xs text-slate-500">
+            Daily breakdown of sales amounts, units deducted, and cashier activity.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+            className="px-3 py-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-semibold"
+          />
+
+          <button
+            onClick={handleExportDailySales}
+            disabled={daySales.length === 0}
+            className="px-3.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold hover:bg-slate-100 flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+          >
+            <Download className="w-3.5 h-3.5 text-emerald-500" />
+            <span>Export CSV</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Daily Summary Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
+          <span className="text-[11px] text-slate-500 font-medium">Daily Revenue</span>
+          <p className="text-lg font-black text-slate-900 dark:text-white mt-1">
+            {formatCurrency(totalRevenue, currentShop?.currency)}
+          </p>
+          <span className="text-[10px] text-emerald-600 font-medium">{totalSalesCount} sales recorded</span>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
+          <span className="text-[11px] text-indigo-600 font-medium">Units Deducted</span>
+          <p className="text-lg font-black text-indigo-600 mt-1">
+            {totalUnitsSold} items
+          </p>
+          <span className="text-[10px] text-slate-400">Sold from stock</span>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
+          <span className="text-[11px] text-amber-600 font-medium">Avg Sale Value</span>
+          <p className="text-lg font-black text-slate-900 dark:text-white mt-1">
+            {formatCurrency(avgSale, currentShop?.currency)}
+          </p>
+          <span className="text-[10px] text-slate-400">Per transaction</span>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
+          <span className="text-[11px] text-purple-600 font-medium">Transactions</span>
+          <p className="text-lg font-black text-slate-900 dark:text-white mt-1">
+            {totalSalesCount}
+          </p>
+          <span className="text-[10px] text-slate-400">System invoices</span>
+        </div>
+      </div>
+
+      {/* Daily Sales Ledger Breakdown */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+        <h2 className="font-bold text-sm text-slate-900 dark:text-white flex items-center justify-between">
+          <span>Sales Ledger for {selectedDate}</span>
+          <span className="text-xs text-slate-400 font-normal">{daySales.length} records</span>
+        </h2>
+
+        {daySales.length === 0 ? (
+          <p className="text-xs text-slate-400 py-8 text-center">No sales recorded on this date.</p>
+        ) : (
+          <div className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+            {daySales.map((sale) => (
+              <div key={sale.id} className="py-2.5 flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-bold text-slate-900 dark:text-white">
+                      {sale.invoiceNo}
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      {formatDateTime(sale.createdAtClient)}
+                    </span>
+                  </div>
+                  <p className="text-slate-600 dark:text-slate-300 truncate mt-0.5">
+                    {sale.lines.map((l) => `${l.qty}x ${l.name}`).join(', ')}
+                  </p>
+                  <p className="text-[10px] text-slate-400">
+                    Seller: {sale.sellerName} &bull; Device: {sale.deviceCode}
+                  </p>
+                </div>
+
+                <div className="text-right shrink-0">
+                  <p className="font-bold text-sm text-slate-900 dark:text-white">
+                    {formatCurrency(sale.total, currentShop?.currency)}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
