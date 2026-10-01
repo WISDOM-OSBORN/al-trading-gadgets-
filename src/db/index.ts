@@ -71,10 +71,10 @@ export async function initializeDatabase() {
     };
 
     const ownerUser: User = {
-      uid: 'user-wisdomosborn65',
+      uid: 'user-rajifarrid',
       shopId: SEED_SHOP_ID,
-      name: 'Wisdom Osborn',
-      email: 'wisdomosborn65@gmail.com',
+      name: 'Raji Farrid',
+      email: 'rajifarrid@gmail.com',
       role: 'owner',
       active: true,
       deviceCode: 'D01',
@@ -317,19 +317,39 @@ export async function initializeDatabase() {
       });
     }
 
-    // Ensure owner account exists in local DB
-    const shopId = existing?.id || SEED_SHOP_ID;
-    await db.users.put({
-      uid: 'user-wisdomosborn65',
-      shopId,
-      name: 'Wisdom Osborn',
-      email: 'wisdomosborn65@gmail.com',
-      role: 'owner',
-      active: true,
-      deviceCode: 'D01',
-      pin: '1234',
-      createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
-    });
+    // Strictly sanitize & enforce ONLY rajifarrid@gmail.com (removes Alex Rivera, Wisdom Osborn, & duplicates)
+    const allUsers = await db.users.toArray();
+    let keptRaji = false;
+    for (const u of allUsers) {
+      if (u.email?.toLowerCase() === 'rajifarrid@gmail.com' && !keptRaji) {
+        keptRaji = true;
+        await db.users.update(u.uid, {
+          name: 'Raji Farrid',
+          email: 'rajifarrid@gmail.com',
+          role: 'owner',
+          active: true,
+          deviceCode: 'D01',
+          pin: '1234',
+        });
+      } else {
+        await db.users.delete(u.uid);
+      }
+    }
+
+    if (!keptRaji) {
+      const shopId = existing?.id || SEED_SHOP_ID;
+      await db.users.put({
+        uid: 'user-rajifarrid',
+        shopId,
+        name: 'Raji Farrid',
+        email: 'rajifarrid@gmail.com',
+        role: 'owner',
+        active: true,
+        deviceCode: 'D01',
+        pin: '1234',
+        createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      });
+    }
   }
 }
 
@@ -353,10 +373,13 @@ export async function purgeDummyData(): Promise<void> {
     await db.imports.clear();
     await db.dailyReports.clear();
 
-    // Delete dummy accounts, keeping only the owner
+    // Delete all accounts except rajifarrid@gmail.com
     const allUsers = await db.users.toArray();
+    let keptRaji = false;
     for (const u of allUsers) {
-      if (u.email === 'rajifarrid@gmail.com' || u.email === 'abuyahwisdomosborn@gmail.com') {
+      if (u.email?.toLowerCase() === 'rajifarrid@gmail.com' && !keptRaji) {
+        keptRaji = true;
+      } else {
         await db.users.delete(u.uid);
       }
     }

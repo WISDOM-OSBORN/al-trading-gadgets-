@@ -4,6 +4,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  deleteDoc,
   collection,
   query,
   where,
@@ -19,6 +20,7 @@ import {
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { User } from '../types';
+import { db } from './index';
 
 // Silence verbose connection retry warnings in console during initial/offline mode
 setLogLevel('error');
@@ -28,19 +30,25 @@ export const firestore = getFirestore(app, firebaseConfig.firestoreDatabaseId ||
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
-// Business Name & Pre-configured Admin & Seller Accounts
+// Business Name & Pre-configured Admin Accounts
 export const BUSINESS_NAME = 'AL-Q ELECTRICALS';
 
 export const DESIGNATED_USERS: Record<
   string,
   { name: string; role: 'owner' | 'seller'; deviceCode: string }
 > = {
-  'wisdomosborn65@gmail.com': {
-    name: 'Wisdom Osborn',
+  'rajifarrid@gmail.com': {
+    name: 'Raji Farrid',
     role: 'owner',
     deviceCode: 'D01',
   },
 };
+
+export interface AuthResult {
+  success: boolean;
+  user?: User;
+  error?: string;
+}
 
 // Seed default shop and designated accounts into Firestore
 export async function seedFirestoreBusinessDefaults(): Promise<void> {
@@ -62,7 +70,23 @@ export async function seedFirestoreBusinessDefaults(): Promise<void> {
       { merge: true }
     );
 
-    // 2. Pre-create designated admin and seller records in Firestore
+    // Clean up deprecated accounts in Firestore
+    const deprecatedIds = [
+      'user-wisdomosborn65_gmail_com',
+      'user-wisdomosborn65',
+      'user-abuyahwisdomosborn_gmail_com',
+      'user-abuyahwisdomosborn',
+      'user-owner_shopledger_app',
+    ];
+    for (const dId of deprecatedIds) {
+      try {
+        await deleteDoc(doc(firestore, 'users', dId));
+      } catch {
+        // non-blocking
+      }
+    }
+
+    // 2. Pre-create designated owner record in Firestore
     for (const [email, info] of Object.entries(DESIGNATED_USERS)) {
       const uid = `user-${email.replace(/[^a-zA-Z0-9]/g, '_')}`;
       const userRef = doc(firestore, 'users', uid);
@@ -76,6 +100,7 @@ export async function seedFirestoreBusinessDefaults(): Promise<void> {
           role: info.role,
           deviceCode: info.deviceCode,
           active: true,
+          pin: '1234',
           updatedAt: Date.now(),
         },
         { merge: true }
@@ -100,99 +125,144 @@ export async function testFirestoreConnection(): Promise<boolean> {
 }
 
 /**
- * Fetch or authenticate user directly from Firestore.
+ * Strictly authenticates registered and active users only.
+ * Disallows arbitrary user creation.
  */
-export async function getOrCreateFirestoreUser(
+export async function authenticateRegisteredUser(
   email: string,
   displayName?: string,
   customUid?: string
-): Promise<User> {
+): Promise<AuthResult> {
   const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail) {
+    return { success: false, error: 'Email address cannot be empty.' };
+  }
+
+  // 1. Check if designated owner (rajifarrid@gmail.com)
   const designated = DESIGNATED_USERS[normalizedEmail];
-  const uid = customUid || `user-${normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
+  if (designated) {
+    const ownerUid = customUid || 'user-rajifarrid';
+    const ownerUser: User = {
+      uid: ownerUid,
+      shopId: 'shop-electrical-01',
+      name: designated.name,
+      email: normalizedEmail,
+      role: designated.role,
+      active: true,
+      deviceCode: designated.deviceCode,
+      pin: '1234',
+      createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+    };
+    return { success: true, user: ownerUser };
+  }
 
-  // 1. Try to find user by document ID or email query in Firestore
+  // 2. Look up user in Firestore 'users' collection
+  let foundUser: User | null = null;
   try {
-    const directDocRef = doc(firestore, 'users', uid);
-    const directDoc = await getDoc(directDocRef);
-
-    if (directDoc.exists()) {
-      const data = directDoc.data();
-      return {
-        uid: directDoc.id,
-        shopId: data.shopId || 'shop-electrical-01',
-        name: data.name || designated?.name || displayName || normalizedEmail.split('@')[0],
-        email: data.email || normalizedEmail,
-        role: designated ? designated.role : (data.role || 'seller'),
-        active: data.active !== false,
-        deviceCode: data.deviceCode || designated?.deviceCode || 'D01',
-        createdAt: data.createdAt || Date.now(),
-      };
-    }
-
-    // Check by email query
     const q = query(collection(firestore, 'users'), where('email', '==', normalizedEmail));
     const querySnap = await getDocs(q);
     if (!querySnap.empty) {
       const docSnap = querySnap.docs[0];
       const data = docSnap.data();
-      return {
+      foundUser = {
         uid: docSnap.id,
         shopId: data.shopId || 'shop-electrical-01',
-        name: data.name || designated?.name || displayName || normalizedEmail.split('@')[0],
+        name: data.name || displayName || normalizedEmail.split('@')[0],
         email: data.email || normalizedEmail,
-        role: designated ? designated.role : (data.role || 'seller'),
-        active: data.active !== false,
-        deviceCode: data.deviceCode || designated?.deviceCode || 'D01',
+        role: data.role || 'seller',
+        active: data.active === true,
+        deviceCode: data.deviceCode || 'D02',
+        pin: data.pin || '1234',
         createdAt: data.createdAt || Date.now(),
       };
+    } else if (customUid) {
+      const directDoc = await getDoc(doc(firestore, 'users', customUid));
+      if (directDoc.exists()) {
+        const data = directDoc.data();
+        if (data.email?.toLowerCase() === normalizedEmail) {
+          foundUser = {
+            uid: directDoc.id,
+            shopId: data.shopId || 'shop-electrical-01',
+            name: data.name || displayName || normalizedEmail.split('@')[0],
+            email: data.email || normalizedEmail,
+            role: data.role || 'seller',
+            active: data.active === true,
+            deviceCode: data.deviceCode || 'D02',
+            pin: data.pin || '1234',
+            createdAt: data.createdAt || Date.now(),
+          };
+        }
+      }
     }
   } catch (err) {
-    console.warn('Firestore user fetch notice:', err);
+    console.warn('Firestore user lookup error (fallback to local verification):', err);
   }
 
-  // 2. Check if this is one of our designated Admins or Seller
-  const role: 'owner' | 'seller' = designated
-    ? designated.role
-    : normalizedEmail.includes('admin') || normalizedEmail.includes('owner')
-    ? 'owner'
-    : 'seller';
+  // 3. Fallback: Check local IndexedDB db.users (staff added by admin locally)
+  if (!foundUser) {
+    try {
+      const localUser = await db.users.where('email').equalsIgnoreCase(normalizedEmail).first();
+      if (localUser) {
+        foundUser = localUser;
+      }
+    } catch {
+      // IndexedDB query notice
+    }
+  }
 
-  const assignedName = designated?.name || displayName || (role === 'owner' ? 'Admin' : 'Seller');
-  const deviceCode = designated?.deviceCode || (role === 'owner' ? 'D01' : 'D03');
+  // 4. SECURITY ENFORCEMENT: Only emails added by the admin are permitted
+  if (!foundUser) {
+    return {
+      success: false,
+      error: `Access Denied: The email "${normalizedEmail}" is not authorized. Only staff accounts pre-registered by the store admin can log in.`,
+    };
+  }
 
-  const newUser: User = {
-    uid,
-    shopId: 'shop-electrical-01',
-    name: assignedName,
-    email: normalizedEmail,
-    role,
-    active: true,
-    deviceCode,
-    createdAt: Date.now(),
+  // 5. SECURITY ENFORCEMENT: Must be a fully active email
+  if (foundUser.active !== true) {
+    return {
+      success: false,
+      error: `Account Deactivated: The account for "${foundUser.name || normalizedEmail}" is currently disabled by the shop owner.`,
+    };
+  }
+
+  return {
+    success: true,
+    user: foundUser,
   };
-
-  // 3. Save new user to Firestore
-  try {
-    await setDoc(doc(firestore, 'users', uid), newUser, { merge: true });
-  } catch (err) {
-    console.warn('Could not write user to Firestore:', err);
-  }
-
-  return newUser;
 }
 
 /**
- * Sign in using Google / Gmail popup
+ * Sign in using Google / Gmail popup with strict authorization check
  */
-export async function signInWithGooglePopup(): Promise<User> {
-  const result = await signInWithPopup(auth, googleProvider);
-  const fbUser: FirebaseUser = result.user;
-  return await getOrCreateFirestoreUser(
-    fbUser.email || '',
-    fbUser.displayName || undefined,
-    fbUser.uid
-  );
+export async function signInWithGooglePopup(): Promise<AuthResult> {
+  try {
+    const result = await signInWithPopup(auth, googleProvider);
+    const fbUser: FirebaseUser = result.user;
+    const email = fbUser.email || '';
+    if (!email) {
+      await signOutFirebase();
+      return { success: false, error: 'No email found in this Google account.' };
+    }
+
+    const authRes = await authenticateRegisteredUser(
+      email,
+      fbUser.displayName || undefined,
+      fbUser.uid
+    );
+
+    if (!authRes.success) {
+      // Immediately sign out from Firebase Auth so unapproved session doesn't linger
+      await signOutFirebase();
+    }
+
+    return authRes;
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err?.message || 'Google sign-in was closed or blocked.',
+    };
+  }
 }
 
 /**

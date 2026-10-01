@@ -68,7 +68,7 @@ export const MySalesScreen: React.FC = () => {
         <div className="flex items-center justify-between">
           <div>
             <p className="text-xs text-emerald-100 font-medium">
-              My Sales Total ({timeFilter === 'today' ? 'Today' : 'Past 7 Days'})
+              {currentUser?.name?.trim().split(' ')[0] || 'My'}'s Sales Total ({timeFilter === 'today' ? 'Today' : 'Past 7 Days'})
             </p>
             <h2 className="text-2xl font-black mt-0.5">
               {formatCurrency(totalRevenue, currentShop?.currency)}

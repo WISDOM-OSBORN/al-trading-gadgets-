@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
-import { Zap, Sun, Moon, Lock } from 'lucide-react';
+import { Zap, Sun, Moon, Lock, ShieldAlert, ShieldCheck } from 'lucide-react';
 
 export const LoginScreen: React.FC = () => {
   const { loginWithGoogle, loginWithGmail } = useAuth();
@@ -14,9 +14,9 @@ export const LoginScreen: React.FC = () => {
     try {
       setIsLoading(true);
       setError(null);
-      const success = await loginWithGoogle();
-      if (!success) {
-        setError('Popup closed or blocked. You can enter your Gmail below.');
+      const res = await loginWithGoogle();
+      if (!res.success) {
+        setError(res.error || 'Access denied: Google account is not authorized.');
       }
     } finally {
       setIsLoading(false);
@@ -30,9 +30,9 @@ export const LoginScreen: React.FC = () => {
     try {
       setIsLoading(true);
       setError(null);
-      const success = await loginWithGmail(gmail.trim());
-      if (!success) {
-        setError('Could not authenticate user from Firestore.');
+      const res = await loginWithGmail(gmail.trim());
+      if (!res.success) {
+        setError(res.error || 'Access denied: Email is not authorized.');
       }
     } finally {
       setIsLoading(false);
@@ -64,6 +64,14 @@ export const LoginScreen: React.FC = () => {
           </p>
         </div>
 
+        {/* Security Notice Banner */}
+        <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/80 text-[11px] text-emerald-800 dark:text-emerald-300 flex items-start gap-2">
+          <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+          <span>
+            <b>Protected Counter:</b> Only active emails added by the admin can log into the platform.
+          </span>
+        </div>
+
         {/* 1. Google / Gmail Sign In */}
         <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200 dark:border-slate-800 shadow-sm space-y-3.5">
           <button
@@ -89,36 +97,45 @@ export const LoginScreen: React.FC = () => {
                 d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
               />
             </svg>
-            <span>Sign in with Google / Gmail</span>
+            <span>Sign in with Google</span>
           </button>
 
           <div className="relative flex py-1 items-center">
             <div className="flex-grow border-t border-slate-200 dark:border-slate-800" />
             <span className="shrink-0 px-2 text-[10px] text-slate-400 uppercase font-semibold">
-              Or enter Gmail
+              Or verify Gmail
             </span>
             <div className="flex-grow border-t border-slate-200 dark:border-slate-800" />
           </div>
 
-          {/* 2. Direct Gmail Input (Authenticated from Firestore) */}
+          {/* 2. Direct Gmail Input (Authenticated from Firestore & Admin list) */}
           <form onSubmit={handleGmailSubmit} className="space-y-2.5 text-xs">
             <input
               type="email"
               required
               value={gmail}
-              onChange={(e) => setGmail(e.target.value)}
-              placeholder="e.g. yourname@gmail.com"
+              onChange={(e) => {
+                setGmail(e.target.value);
+                if (error) setError(null);
+              }}
+              placeholder="e.g. staff@gmail.com"
               className="w-full px-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
             />
 
-            {error && <p className="text-[11px] text-rose-500 font-medium">{error}</p>}
+            {error && (
+              <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-[11px] text-rose-700 dark:text-rose-300 font-medium flex items-start gap-2">
+                <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
 
             <button
               type="submit"
               disabled={isLoading || !gmail.trim()}
-              className="w-full py-2.5 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition cursor-pointer disabled:opacity-50 shadow-sm"
+              className="w-full py-2.5 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition cursor-pointer disabled:opacity-50 shadow-sm flex items-center justify-center gap-1.5"
             >
-              {isLoading ? 'Connecting...' : 'Enter with Gmail'}
+              <Lock className="w-3.5 h-3.5" />
+              <span>{isLoading ? 'Verifying Authorization...' : 'Verify & Enter'}</span>
             </button>
           </form>
         </div>
@@ -126,7 +143,7 @@ export const LoginScreen: React.FC = () => {
         {/* Security badge footer */}
         <div className="text-center pt-2 flex items-center justify-center gap-1.5 text-[11px] text-slate-400 dark:text-slate-500">
           <Lock className="w-3.5 h-3.5" />
-          <span>Authorized shop staff authentication</span>
+          <span>Strict RBAC Security &bull; Store Owner: rajifarrid@gmail.com</span>
         </div>
       </div>
     </div>

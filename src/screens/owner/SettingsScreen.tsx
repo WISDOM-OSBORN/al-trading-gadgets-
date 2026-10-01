@@ -4,7 +4,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { User, Sale } from '../../types';
 import { db, purgeDummyData, resetDatabaseWithSeed } from '../../db';
 import { firestore } from '../../db/firebase';
-import { doc, deleteDoc } from 'firebase/firestore';
+import { doc, deleteDoc, setDoc } from 'firebase/firestore';
 import { formatDateTime } from '../../utils/formatters';
 import {
   calculateDailyClosing,
@@ -15,7 +15,6 @@ import {
 import {
   Settings,
   Store,
-  Receipt,
   Users,
   Database,
   RotateCcw,
@@ -81,7 +80,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     currentShop?.settings.closingTime || '20:00'
   );
   const [closingReportEmail, setClosingReportEmail] = useState(
-    currentShop?.settings.closingReportEmail || currentUser?.email || 'wisdomosborn65@gmail.com'
+    currentShop?.settings.closingReportEmail || currentUser?.email || 'rajifarrid@gmail.com'
   );
   const [closingReportWhatsapp, setClosingReportWhatsapp] = useState(
     currentShop?.settings.closingReportWhatsapp || currentShop?.phone || '+233 24 123 4567'
@@ -115,7 +114,48 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   const loadSellers = async () => {
     if (!currentShop) return;
     const allUsers = await db.users.where('shopId').equals(currentShop.id).toArray();
-    setSellers(allUsers);
+    const cleanUsers: User[] = [];
+    let seenRaji = false;
+
+    for (const u of allUsers) {
+      if (u.email?.toLowerCase() === 'rajifarrid@gmail.com') {
+        if (!seenRaji) {
+          seenRaji = true;
+          cleanUsers.push(u);
+        } else {
+          await db.users.delete(u.uid);
+        }
+      } else if (
+        u.email?.toLowerCase() === 'owner@shopledger.app' ||
+        u.email?.toLowerCase() === 'wisdomosborn65@gmail.com' ||
+        u.email?.toLowerCase() === 'abuyahwisdomosborn@gmail.com' ||
+        u.name?.toLowerCase().includes('alex rivera') ||
+        u.name?.toLowerCase().includes('wisdom osborn')
+      ) {
+        // Automatically delete deprecated accounts
+        await db.users.delete(u.uid);
+      } else {
+        cleanUsers.push(u);
+      }
+    }
+
+    if (!seenRaji) {
+      const raji: User = {
+        uid: 'user-rajifarrid',
+        shopId: currentShop.id,
+        name: 'Raji Farrid',
+        email: 'rajifarrid@gmail.com',
+        role: 'owner',
+        active: true,
+        deviceCode: 'D01',
+        pin: '1234',
+        createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      };
+      await db.users.put(raji);
+      cleanUsers.unshift(raji);
+    }
+
+    setSellers(cleanUsers);
   };
 
   useEffect(() => {
@@ -136,7 +176,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       setEditPin(currentShop.settings.editPin || '1234');
       setClosingTime(currentShop.settings.closingTime || '20:00');
       setClosingReportEmail(
-        currentShop.settings.closingReportEmail || currentUser?.email || 'wisdomosborn65@gmail.com'
+        currentShop.settings.closingReportEmail || currentUser?.email || 'rajifarrid@gmail.com'
       );
       setClosingReportWhatsapp(
         currentShop.settings.closingReportWhatsapp || currentShop.phone || '+233 24 123 4567'
@@ -211,6 +251,20 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     };
 
     await db.users.add(newUser);
+    try {
+      const userRef = doc(firestore, 'users', newUid);
+      await setDoc(
+        userRef,
+        {
+          ...newUser,
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      );
+    } catch {
+      // offline mode
+    }
+
     await db.auditLogs.add({
       id: `audit-${Date.now()}`,
       shopId: currentShop.id,
@@ -278,7 +332,17 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   // Toggle seller active
   const handleToggleSellerActive = async (user: User) => {
     if (user.role === 'owner') return;
-    await db.users.update(user.uid, { active: !user.active });
+    const newActiveState = !user.active;
+    await db.users.update(user.uid, { active: newActiveState });
+
+    // Sync active state to Firestore
+    try {
+      const userRef = doc(firestore, 'users', user.uid);
+      await setDoc(userRef, { active: newActiveState, updatedAt: Date.now() }, { merge: true });
+    } catch (fErr) {
+      console.warn('Firestore active state sync notice:', fErr);
+    }
+
     await loadSellers();
   };
 
@@ -294,12 +358,13 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       setIsPurging(true);
       await purgeDummyData();
 
-      // Clean dummy accounts from Firestore
+      // Clean dummy accounts from Firestore (preserving owner Raji Farrid)
       try {
-        await deleteDoc(doc(firestore, 'users', 'user-rajifarrid'));
+        await deleteDoc(doc(firestore, 'users', 'user-wisdomosborn65'));
         await deleteDoc(doc(firestore, 'users', 'user-abuyahwisdomosborn'));
+        await deleteDoc(doc(firestore, 'users', 'user-owner_shopledger_app'));
       } catch {
-        // Non-blocking
+        // non-blocking
       }
 
       setShowPurgeModal(false);
@@ -656,57 +721,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
           </div>
         </div>
 
-        {/* Section 3: Receipt & Sales Policies */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-          <div className="flex items-center gap-2 pb-2 border-b border-slate-100 dark:border-slate-800">
-            <Receipt className="w-4 h-4 text-emerald-500" />
-            <h2 className="font-bold text-sm text-slate-900 dark:text-white">
-              Counter Rules & Invoices
-            </h2>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Invoice Prefix
-              </label>
-              <input
-                type="text"
-                maxLength={5}
-                value={invoicePrefix}
-                onChange={(e) => setInvoicePrefix(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-mono uppercase"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Tax Rate (%)
-              </label>
-              <input
-                type="number"
-                min="0"
-                max="100"
-                value={taxRate}
-                onChange={(e) => setTaxRate(Number(e.target.value))}
-                className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
-              />
-            </div>
-
-            <div className="sm:col-span-2">
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Receipt Footer Message
-              </label>
-              <input
-                type="text"
-                value={receiptFooter}
-                onChange={(e) => setReceiptFooter(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
-              />
-            </div>
-          </div>
-        </div>
-
         {/* Save Settings Bar */}
         <div className="flex justify-end pt-1">
           <button
@@ -755,7 +769,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
                         : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
                     }`}
                   >
-                    {user.role}
+                    {user.role === 'owner' ? 'Owner' : 'Staff'}
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-0.5">{user.email}</p>

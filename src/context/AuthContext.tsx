@@ -3,7 +3,7 @@ import { User, Shop, UserRole } from '../types';
 import { db, initializeDatabase } from '../db';
 import {
   signInWithGooglePopup,
-  getOrCreateFirestoreUser,
+  authenticateRegisteredUser,
   signOutFirebase,
 } from '../db/firebase';
 
@@ -12,9 +12,9 @@ interface AuthContextType {
   currentShop: Shop | null;
   isLoading: boolean;
   isLocked: boolean;
-  login: (email: string, role?: UserRole) => Promise<boolean>;
-  loginWithGoogle: () => Promise<boolean>;
-  loginWithGmail: (email: string) => Promise<boolean>;
+  login: (email: string, role?: UserRole) => Promise<{ success: boolean; error?: string }>;
+  loginWithGoogle: () => Promise<{ success: boolean; error?: string }>;
+  loginWithGmail: (email: string) => Promise<{ success: boolean; error?: string }>;
   unlockWithPin: (pin: string) => Promise<boolean>;
   lockScreen: () => void;
   logout: () => void;
@@ -42,26 +42,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setCurrentShop(shop);
         }
 
+        let user: User | undefined;
         const savedUid = localStorage.getItem('shopledger_active_uid');
         if (savedUid) {
-          const user = await db.users.get(savedUid);
-          if (user && user.active) {
-            setCurrentUser(user);
+          const candidate = await db.users.get(savedUid);
+          // Strictly verify the candidate account is still ACTIVE
+          if (candidate && candidate.active === true) {
+            user = candidate;
           } else {
-            // Default to owner user
-            const owner = await db.users.where('role').equals('owner').first();
-            if (owner) {
-              setCurrentUser(owner);
-              localStorage.setItem('shopledger_active_uid', owner.uid);
-            }
+            localStorage.removeItem('shopledger_active_uid');
           }
-        } else {
-          // Default start as owner
-          const owner = await db.users.where('role').equals('owner').first();
-          if (owner) {
-            setCurrentUser(owner);
+        }
+
+        // If no active session, default to verified primary owner
+        if (!user) {
+          const owner = await db.users.where('email').equalsIgnoreCase('rajifarrid@gmail.com').first();
+          if (owner && owner.active) {
+            user = owner;
             localStorage.setItem('shopledger_active_uid', owner.uid);
           }
+        }
+
+        if (user && user.active) {
+          setCurrentUser(user);
+        } else {
+          setCurrentUser(null);
         }
       } catch (err) {
         console.error('Failed to initialize auth:', err);
@@ -101,53 +106,68 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [currentUser, isLocked]);
 
   // Sign in with Google / Gmail popup
-  const loginWithGoogle = async (): Promise<boolean> => {
+  const loginWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
     try {
-      const user = await signInWithGooglePopup();
-      await db.users.put(user);
-      setCurrentUser(user);
-      localStorage.setItem('shopledger_active_uid', user.uid);
+      const authRes = await signInWithGooglePopup();
+      if (!authRes.success || !authRes.user) {
+        return { success: false, error: authRes.error || 'Google login denied.' };
+      }
+
+      await db.users.put(authRes.user);
+      setCurrentUser(authRes.user);
+      localStorage.setItem('shopledger_active_uid', authRes.user.uid);
       setIsLocked(false);
-      return true;
+      return { success: true };
     } catch (err: any) {
       console.warn('Google sign-in popup issue:', err);
-      return false;
+      return { success: false, error: err?.message || 'Google sign-in popup issue.' };
     }
   };
 
-  // Sign in or authenticate by Gmail / Email from Firestore
-  const loginWithGmail = async (email: string): Promise<boolean> => {
+  // Sign in or authenticate by Gmail / Email from registered users list
+  const loginWithGmail = async (email: string): Promise<{ success: boolean; error?: string }> => {
     try {
-      const user = await getOrCreateFirestoreUser(email);
-      await db.users.put(user);
-      setCurrentUser(user);
-      localStorage.setItem('shopledger_active_uid', user.uid);
+      const authRes = await authenticateRegisteredUser(email);
+      if (!authRes.success || !authRes.user) {
+        return { success: false, error: authRes.error || 'Authentication denied.' };
+      }
+
+      await db.users.put(authRes.user);
+      setCurrentUser(authRes.user);
+      localStorage.setItem('shopledger_active_uid', authRes.user.uid);
       setIsLocked(false);
-      return true;
+      return { success: true };
     } catch (err: any) {
-      console.error('Failed to authenticate Gmail user from Firestore:', err);
-      return false;
+      console.error('Failed to authenticate Gmail user:', err);
+      return { success: false, error: err?.message || 'Failed to authenticate user.' };
     }
   };
 
-  const login = async (email: string): Promise<boolean> => {
-    // Check local DB first, then Firestore
-    const localUser = await db.users.where('email').equalsIgnoreCase(email.trim()).first();
-    if (localUser && localUser.active) {
-      setCurrentUser(localUser);
-      localStorage.setItem('shopledger_active_uid', localUser.uid);
-      setIsLocked(false);
-      return true;
-    }
+  const login = async (email: string): Promise<{ success: boolean; error?: string }> => {
     return await loginWithGmail(email);
   };
 
   const unlockWithPin = async (pin: string): Promise<boolean> => {
-    if (!currentUser) return false;
-    if (currentUser.pin === pin || pin === '1234') {
+    // Cannot unlock if user does not exist or has been deactivated
+    if (!currentUser || currentUser.active !== true) return false;
+    const trimmedInput = pin.trim();
+
+    // Strict validation: User must enter THEIR actual assigned PIN
+    if (currentUser.pin && currentUser.pin === trimmedInput) {
       setIsLocked(false);
       return true;
     }
+
+    // Owner can also use the Store Security PIN if defined
+    if (
+      currentUser.role === 'owner' &&
+      currentShop?.settings?.editPin &&
+      currentShop.settings.editPin === trimmedInput
+    ) {
+      setIsLocked(false);
+      return true;
+    }
+
     return false;
   };
 
@@ -170,22 +190,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const refreshShop = async () => {
-    const shop = await db.shops.toCollection().first();
-    if (shop) setCurrentShop(shop);
-  };
-
-  const updateShopSettings = async (newSettings: Partial<Shop['settings']>) => {
+  const updateShopSettings = async (settings: Partial<Shop['settings']>) => {
     if (!currentShop) return;
-    const merged = { ...currentShop.settings, ...newSettings };
-    await db.shops.update(currentShop.id, { settings: merged });
-    setCurrentShop((prev) => (prev ? { ...prev, settings: merged } : prev));
+    const updatedSettings = { ...currentShop.settings, ...settings };
+    await db.shops.update(currentShop.id, {
+      settings: updatedSettings,
+    });
+    setCurrentShop((prev) => (prev ? { ...prev, settings: updatedSettings } : null));
   };
 
   const updateShopDetails = async (details: Partial<Shop>) => {
     if (!currentShop) return;
-    await db.shops.update(currentShop.id, details);
-    setCurrentShop((prev) => (prev ? { ...prev, ...details } : prev));
+    await db.shops.update(currentShop.id, {
+      ...details,
+    });
+    setCurrentShop((prev) => (prev ? { ...prev, ...details } : null));
+  };
+
+  const refreshShop = async () => {
+    if (!currentShop) return;
+    const fresh = await db.shops.get(currentShop.id);
+    if (fresh) setCurrentShop(fresh);
   };
 
   return (
@@ -214,6 +239,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (!context) throw new Error('useAuth must be used within an AuthProvider');
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
   return context;
 };
