@@ -13,8 +13,8 @@ import {
   History,
   Zap,
   Boxes,
-  ArrowRight,
   Sparkles,
+  X,
 } from 'lucide-react';
 
 export const SellScreen: React.FC = () => {
@@ -29,7 +29,6 @@ export const SellScreen: React.FC = () => {
   // Active Sale Form State
   const [selectedItem, setSelectedItem] = useState<Item | null>(null);
   const [sellQuantity, setSellQuantity] = useState<number>(1);
-  const [sellAmount, setSellAmount] = useState<number>(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -97,24 +96,25 @@ export const SellScreen: React.FC = () => {
     });
   }, [items, searchQuery, selectedCategory]);
 
-  // Handle selecting an item to sell
+  // Handle selecting an item to sell - pops out the number of items box immediately!
   const handleSelectItem = (item: Item) => {
+    if (selectedItem?.id === item.id) {
+      // Toggle off if clicked again
+      setSelectedItem(null);
+      return;
+    }
     setSelectedItem(item);
     setSellQuantity(1);
-    setSellAmount(item.sellingPrice);
     setErrorMessage(null);
   };
 
-  // Adjust quantity & auto update default amount
+  // Adjust quantity
   const handleQtyChange = (qty: number) => {
     const validQty = Math.max(1, qty);
     setSellQuantity(validQty);
-    if (selectedItem) {
-      setSellAmount(Number((validQty * selectedItem.sellingPrice).toFixed(2)));
-    }
   };
 
-  // Record Sale: Allocates system invoice #, decrements ledger, records exact time
+  // Record Sale: Allocates system invoice #, decrements ledger, records exact time in Firestore
   const handleRecordSale = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedItem || !currentUser || !currentShop) return;
@@ -122,10 +122,8 @@ export const SellScreen: React.FC = () => {
       setErrorMessage('Quantity must be at least 1.');
       return;
     }
-    if (sellAmount < 0) {
-      setErrorMessage('Sale amount cannot be negative.');
-      return;
-    }
+
+    const calculatedTotal = Number((sellQuantity * selectedItem.sellingPrice).toFixed(2));
 
     if (!currentShop.settings.allowNegativeStock && selectedItem.quantity < sellQuantity) {
       setErrorMessage(
@@ -137,8 +135,6 @@ export const SellScreen: React.FC = () => {
     try {
       setIsSubmitting(true);
       setErrorMessage(null);
-
-      const unitPrice = sellQuantity > 0 ? Number((sellAmount / sellQuantity).toFixed(2)) : selectedItem.sellingPrice;
 
       const saleRecord = await recordSale({
         shopId: currentShop.id,
@@ -153,14 +149,14 @@ export const SellScreen: React.FC = () => {
             name: selectedItem.name,
             sku: selectedItem.sku,
             qty: sellQuantity,
-            unitPrice: unitPrice,
+            unitPrice: selectedItem.sellingPrice,
             costPriceAtSale: selectedItem.costPrice,
             discount: 0,
-            lineTotal: sellAmount,
+            lineTotal: calculatedTotal,
           },
         ],
-        subtotal: sellAmount,
-        total: sellAmount,
+        subtotal: calculatedTotal,
+        total: calculatedTotal,
       });
 
       const remaining = selectedItem.quantity - sellQuantity;
@@ -177,17 +173,19 @@ export const SellScreen: React.FC = () => {
         time: timeString,
         itemName: selectedItem.name,
         quantitySold: sellQuantity,
-        amount: sellAmount,
+        amount: calculatedTotal,
         remainingStock: remaining,
       });
 
-      // Reset selection
+      // Reset selection and close the popout box
       setSelectedItem(null);
       setSellQuantity(1);
-      setSellAmount(0);
 
       // Refresh items list to reflect deducted stock
       await loadItems();
+
+      // Refocus search bar for next customer sale
+      searchInputRef.current?.focus();
     } catch (err: any) {
       setErrorMessage(err?.message || 'Failed to record sale.');
     } finally {
@@ -240,7 +238,7 @@ export const SellScreen: React.FC = () => {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search shop items by gadget name, SKU, or brand..."
+            placeholder="Search items by gadget name, SKU, or brand..."
             className="w-full pl-9 pr-10 py-2.5 bg-slate-50 dark:bg-slate-800/80 rounded-xl text-xs sm:text-sm border border-slate-200 dark:border-slate-700 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 font-medium text-slate-900 dark:text-white"
           />
           {searchQuery && (
@@ -272,17 +270,17 @@ export const SellScreen: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4">
-        {/* Left Column: Shop Catalog Items (Col 1-7) */}
+        {/* Main Column: Shop Catalog Items & Inline Popout Box (Col 1-7 on desktop, full width on mobile) */}
         <div className="lg:col-span-7 space-y-3">
           <div className="bg-white dark:bg-slate-900 rounded-2xl p-3 border border-slate-200 dark:border-slate-800 shadow-xs">
             <div className="flex items-center justify-between mb-2 px-1">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                Shop Items Catalog ({filteredItems.length})
+                Items Catalog ({filteredItems.length})
               </span>
               <span className="text-[11px] text-slate-400">Tap item to sell</span>
             </div>
 
-            <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[500px] overflow-y-auto">
+            <div className="divide-y divide-slate-100 dark:divide-slate-800">
               {filteredItems.length === 0 ? (
                 <div className="py-12 text-center text-slate-500 text-xs">
                   No electrical gadgets found matching your search.
@@ -294,52 +292,183 @@ export const SellScreen: React.FC = () => {
                   const isLow = !isOut && item.quantity <= item.reorderLevel;
 
                   return (
-                    <div
-                      key={item.id}
-                      onClick={() => handleSelectItem(item)}
-                      className={`py-2.5 px-2 rounded-xl transition cursor-pointer flex items-center justify-between gap-2 ${
-                        isSelected
-                          ? 'bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-500/50'
-                          : 'hover:bg-slate-50 dark:hover:bg-slate-800/60 active:bg-slate-100'
-                      }`}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="font-semibold text-xs sm:text-sm text-slate-900 dark:text-white truncate">
-                            {item.name}
+                    <div key={item.id} className="py-1.5">
+                      {/* Item clickable row */}
+                      <div
+                        onClick={() => handleSelectItem(item)}
+                        className={`py-2 px-2.5 rounded-xl transition cursor-pointer flex items-center justify-between gap-2 ${
+                          isSelected
+                            ? 'bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-500/60'
+                            : 'hover:bg-slate-50 dark:hover:bg-slate-800/60 active:bg-slate-100'
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <p className="font-semibold text-xs sm:text-sm text-slate-900 dark:text-white truncate">
+                              {item.name}
+                            </p>
+                            {isOut ? (
+                              <span className="shrink-0 px-1.5 py-0.5 rounded bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 text-[10px] font-bold">
+                                Out of stock
+                              </span>
+                            ) : isLow ? (
+                              <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-[10px] font-bold">
+                                Low ({item.quantity})
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                            SKU: {item.sku} &bull; {item.brand} &bull;{' '}
+                            <strong className="text-slate-700 dark:text-slate-300">
+                              {item.quantity} in stock
+                            </strong>
                           </p>
-                          {isOut ? (
-                            <span className="shrink-0 px-1.5 py-0.5 rounded bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 text-[10px] font-bold">
-                              Out of stock
-                            </span>
-                          ) : isLow ? (
-                            <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-[10px] font-bold">
-                              Low ({item.quantity})
-                            </span>
-                          ) : null}
                         </div>
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                          SKU: {item.sku} &bull; {item.brand} &bull;{' '}
-                          <strong className="text-slate-700 dark:text-slate-300">
-                            {item.quantity} in stock
-                          </strong>
-                        </p>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white">
+                            {formatCurrency(item.sellingPrice, currentShop?.currency)}
+                          </span>
+                          <div
+                            className={`px-2.5 py-1 rounded-lg font-bold text-xs transition ${
+                              isSelected
+                                ? 'bg-emerald-600 text-white shadow-xs'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                            }`}
+                          >
+                            {isSelected ? 'Selling' : 'Select'}
+                          </div>
+                        </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white">
-                          {formatCurrency(item.sellingPrice, currentShop?.currency)}
-                        </span>
-                        <div
-                          className={`px-2.5 py-1 rounded-lg font-bold text-xs transition ${
-                            isSelected
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
-                          }`}
-                        >
-                          {isSelected ? 'Selected' : 'Select'}
+                      {/* POPOUT BOX RIGHT UNDER AFTER SELECTING THE ITEM */}
+                      {isSelected && (
+                        <div className="mt-2 p-3 sm:p-4 bg-emerald-50/70 dark:bg-slate-800/90 rounded-2xl border-2 border-emerald-500 shadow-md animate-in fade-in slide-in-from-top-2 duration-150 space-y-3">
+                          <div className="flex items-center justify-between pb-1.5 border-b border-emerald-200/60 dark:border-slate-700">
+                            <span className="text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                              <Zap className="w-3.5 h-3.5 fill-current" />
+                              Enter Quantity & Sale Amount
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedItem(null)}
+                              className="p-1 rounded-lg hover:bg-emerald-200/50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 cursor-pointer"
+                              title="Close box"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+
+                          <form onSubmit={handleRecordSale} className="space-y-3">
+                            {/* 1. Number of items going to be sold */}
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <label className="font-bold text-xs text-slate-800 dark:text-slate-200">
+                                  Number of items to sell:
+                                </label>
+                                <span className="text-[11px] text-slate-500">
+                                  Leaves{' '}
+                                  <strong className="text-slate-800 dark:text-slate-200">
+                                    {item.quantity - sellQuantity}
+                                  </strong>{' '}
+                                  in stock
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                {/* Stepper */}
+                                <div className="flex items-center border border-slate-300 dark:border-slate-600 rounded-xl overflow-hidden bg-white dark:bg-slate-900 shadow-2xs">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleQtyChange(sellQuantity - 1)}
+                                    className="w-9 h-9 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-95 cursor-pointer"
+                                  >
+                                    <Minus className="w-4 h-4" />
+                                  </button>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max={
+                                      currentShop?.settings.allowNegativeStock
+                                        ? undefined
+                                        : item.quantity
+                                    }
+                                    value={sellQuantity}
+                                    onChange={(e) =>
+                                      handleQtyChange(parseInt(e.target.value) || 1)
+                                    }
+                                    className="w-12 text-center font-black text-sm bg-transparent border-none text-slate-900 dark:text-white"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleQtyChange(sellQuantity + 1)}
+                                    className="w-9 h-9 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-95 cursor-pointer"
+                                  >
+                                    <Plus className="w-4 h-4" />
+                                  </button>
+                                </div>
+
+                                {/* Quick tap quantity buttons */}
+                                <div className="flex items-center gap-1">
+                                  {[1, 2, 3, 5, 10].map((num) => (
+                                    <button
+                                      key={num}
+                                      type="button"
+                                      onClick={() => handleQtyChange(num)}
+                                      className={`px-2 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                                        sellQuantity === num
+                                          ? 'bg-emerald-600 text-white'
+                                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50'
+                                      }`}
+                                    >
+                                      {num}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+
+                              {/* Price Info Summary (Non-editable) */}
+                              <div className="flex items-center justify-between px-1 py-0.5 text-xs text-slate-600 dark:text-slate-300">
+                                <span>Unit Price:</span>
+                                <span className="font-bold text-slate-900 dark:text-white">
+                                  {formatCurrency(item.sellingPrice, currentShop?.currency)} each
+                                </span>
+                              </div>
+
+                            {errorMessage && (
+                              <div className="p-2 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-300 text-xs flex items-center gap-1.5">
+                                <AlertTriangle className="w-4 h-4 shrink-0" />
+                                <span>{errorMessage}</span>
+                              </div>
+                            )}
+
+                            {/* Action Buttons: Cancel and Big Record Sale */}
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedItem(null)}
+                                className="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+
+                              <button
+                                type="submit"
+                                disabled={isSubmitting}
+                                className="flex-1 min-h-[44px] rounded-xl bg-emerald-600 text-white font-bold text-xs sm:text-sm shadow-md hover:bg-emerald-700 transition active:scale-98 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                              >
+                                <Sparkles className="w-4 h-4" />
+                                <span>
+                                  {isSubmitting
+                                    ? 'Recording Sale...'
+                                    : `Record Sale • ${formatCurrency(sellQuantity * item.sellingPrice, currentShop?.currency)}`}
+                                </span>
+                              </button>
+                            </div>
+                          </form>
                         </div>
-                      </div>
+                      )}
                     </div>
                   );
                 })
@@ -348,169 +477,43 @@ export const SellScreen: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Column: Record Sale Panel (Col 8-12) */}
+        {/* Right Column: Recent Sales Today Ledger */}
         <div className="lg:col-span-5 space-y-3">
-          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-sm sticky top-16">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100 dark:border-slate-800 mb-3">
-              <span className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-1.5">
-                <Zap className="w-4 h-4 text-emerald-500" />
-                Record Sale
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-3 sm:p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-2.5">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                <History className="w-3.5 h-3.5" />
+                Recent Sales Today
               </span>
               <span className="text-[11px] text-slate-400">
                 Staff: {currentUser?.name.split(' ')[0]}
               </span>
             </div>
 
-            {!selectedItem ? (
-              <div className="py-10 text-center text-slate-400 text-xs space-y-2">
-                <div className="w-10 h-10 mx-auto rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400">
-                  <Boxes className="w-5 h-5" />
-                </div>
-                <p className="font-medium text-slate-600 dark:text-slate-300">No Item Selected</p>
-                <p className="text-[11px] max-w-xs mx-auto">
-                  Tap any item from the shop catalog on the left to enter amount and record the sale.
-                </p>
-              </div>
-            ) : (
-              <form onSubmit={handleRecordSale} className="space-y-3.5 text-xs">
-                {/* Selected Item Info Box */}
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
-                  <p className="font-bold text-sm text-slate-900 dark:text-white">
-                    {selectedItem.name}
-                  </p>
-                  <div className="flex items-center justify-between mt-1 text-[11px] text-slate-500">
-                    <span>SKU: {selectedItem.sku}</span>
-                    <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                      Currently {selectedItem.quantity} in stock
-                    </span>
-                  </div>
-                </div>
-
-                {/* Quantity Sold Stepper */}
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Number of Items Sold:
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden bg-white dark:bg-slate-900">
-                      <button
-                        type="button"
-                        onClick={() => handleQtyChange(sellQuantity - 1)}
-                        className="w-10 h-10 flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-95"
-                      >
-                        <Minus className="w-4 h-4" />
-                      </button>
-                      <input
-                        type="number"
-                        min="1"
-                        max={currentShop?.settings.allowNegativeStock ? undefined : selectedItem.quantity}
-                        value={sellQuantity}
-                        onChange={(e) => handleQtyChange(parseInt(e.target.value) || 1)}
-                        className="w-14 text-center font-black text-sm bg-transparent border-none text-slate-900 dark:text-white"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleQtyChange(sellQuantity + 1)}
-                        className="w-10 h-10 flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-95"
-                      >
-                        <Plus className="w-4 h-4" />
-                      </button>
-                    </div>
-
-                    <span className="text-xs text-slate-500">
-                      Will leave{' '}
-                      <strong className="text-slate-800 dark:text-slate-200">
-                        {selectedItem.quantity - sellQuantity}
-                      </strong>{' '}
-                      in stock
-                    </span>
-                  </div>
-                </div>
-
-                {/* Amount Entered */}
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Total Amount ({currentShop?.currencySymbol || 'GH₵'}) *:
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0"
-                      required
-                      value={sellAmount}
-                      onChange={(e) => setSellAmount(parseFloat(e.target.value) || 0)}
-                      className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-black text-base text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-                    />
-                  </div>
-                  <p className="text-[10px] text-slate-400 mt-1">
-                    Pre-calculated from retail price. You can adjust the exact amount collected.
-                  </p>
-                </div>
-
-                {errorMessage && (
-                  <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-300 text-xs flex items-center gap-1.5">
-                    <AlertTriangle className="w-4 h-4 shrink-0" />
-                    <span>{errorMessage}</span>
-                  </div>
-                )}
-
-                {/* Final Record Sale Button */}
-                <div className="pt-2 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedItem(null)}
-                    className="px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300"
-                  >
-                    Cancel
-                  </button>
-
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    className="flex-1 min-h-[48px] rounded-xl bg-emerald-600 text-white font-bold text-sm shadow-md hover:bg-emerald-700 transition active:scale-98 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                  >
-                    <Sparkles className="w-4 h-4" />
-                    <span>
-                      {isSubmitting
-                        ? 'Recording...'
-                        : `Record Sale (${formatCurrency(sellAmount, currentShop?.currency)})`}
-                    </span>
-                  </button>
-                </div>
-              </form>
-            )}
-          </div>
-
-          {/* Quick Ledger of Recent Sales Today */}
-          <div className="bg-white dark:bg-slate-900 rounded-2xl p-3 border border-slate-200 dark:border-slate-800 shadow-xs space-y-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-              <History className="w-3.5 h-3.5" />
-              Recent Sales Ledger
-            </span>
-
             {recentSales.length === 0 ? (
-              <p className="text-xs text-slate-400 py-3 text-center">No sales recorded yet today.</p>
+              <p className="text-xs text-slate-400 py-6 text-center">
+                No sales recorded yet today. Tap any item to record a sale.
+              </p>
             ) : (
               <div className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
                 {recentSales.map((sale) => (
-                  <div key={sale.id} className="py-2 flex items-center justify-between gap-2">
+                  <div key={sale.id} className="py-2.5 flex items-center justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-bold text-slate-900 dark:text-white">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-slate-900 dark:text-white font-mono">
                           {sale.invoiceNo}
                         </span>
                         <span className="text-[10px] text-slate-500 font-medium">
                           {sale.exactTimeSold || formatTime(sale.createdAtClient)}
                         </span>
                       </div>
-                      <p className="text-[11px] text-slate-500 truncate">
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
                         {sale.lines.map((l) => `${l.qty}x ${l.name}`).join(', ')}
                       </p>
                     </div>
 
                     <div className="text-right shrink-0">
-                      <span className="font-bold text-slate-900 dark:text-white">
+                      <span className="font-bold text-slate-900 dark:text-white text-xs sm:text-sm">
                         {formatCurrency(sale.total, currentShop?.currency)}
                       </span>
                     </div>

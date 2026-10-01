@@ -4,6 +4,11 @@ import { Sale } from '../../types';
 import { db } from '../../db';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { downloadCSV } from '../../utils/csv';
+import {
+  calculateDailyClosing,
+  generateWhatsAppClosingUrl,
+  printDailyClosingPDF,
+} from '../../utils/dailyClosingReport';
 import Papa from 'papaparse';
 import {
   FileSpreadsheet,
@@ -13,6 +18,8 @@ import {
   Boxes,
   Users,
   TrendingUp,
+  Share2,
+  Printer,
 } from 'lucide-react';
 
 export const ReportsScreen: React.FC = () => {
@@ -67,6 +74,23 @@ export const ReportsScreen: React.FC = () => {
     downloadCSV(csv, `sales-report-${selectedDate}.csv`);
   };
 
+  // 1-Tap WhatsApp Summary
+  const handleShareWhatsApp = () => {
+    const summary = calculateDailyClosing(daySales, selectedDate);
+    const url = generateWhatsAppClosingUrl(
+      summary,
+      currentShop,
+      currentShop?.settings?.closingReportWhatsapp
+    );
+    window.open(url, '_blank');
+  };
+
+  // 1-Tap Printable PDF
+  const handlePrintPDF = () => {
+    const summary = calculateDailyClosing(daySales, selectedDate);
+    printDailyClosingPDF(summary, currentShop);
+  };
+
   return (
     <div className="pb-24 pt-1 max-w-4xl mx-auto px-2 sm:px-4 space-y-3">
       {/* Top Header */}
@@ -81,7 +105,7 @@ export const ReportsScreen: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <input
             type="date"
             value={selectedDate}
@@ -90,12 +114,32 @@ export const ReportsScreen: React.FC = () => {
           />
 
           <button
+            onClick={handleShareWhatsApp}
+            disabled={daySales.length === 0}
+            className="px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+            title="Share to WhatsApp"
+          >
+            <Share2 className="w-3.5 h-3.5" />
+            <span>WhatsApp</span>
+          </button>
+
+          <button
+            onClick={handlePrintPDF}
+            disabled={daySales.length === 0}
+            className="px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold hover:bg-slate-800 dark:hover:bg-slate-100 flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+            title="Print or Save as PDF"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>PDF</span>
+          </button>
+
+          <button
             onClick={handleExportDailySales}
             disabled={daySales.length === 0}
-            className="px-3.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold hover:bg-slate-100 flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+            className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold hover:bg-slate-100 flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
           >
             <Download className="w-3.5 h-3.5 text-emerald-500" />
-            <span>Export CSV</span>
+            <span>CSV</span>
           </button>
         </div>
       </div>

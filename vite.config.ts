@@ -14,9 +14,9 @@ export default defineConfig(() => {
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
         manifest: {
           id: '/',
-          name: 'ShopLedger - Offline PWA',
-          short_name: 'ShopLedger',
-          description: 'Mobile-first offline-capable shop management and POS for electrical gadgets.',
+          name: 'AL-Q ELECTRICALS',
+          short_name: 'AL-Q ELECTRICALS',
+          description: 'AL-Q ELECTRICALS - Mobile-first offline shop management and POS for electrical gadgets.',
           theme_color: '#0f172a',
           background_color: '#0f172a',
           display: 'standalone',

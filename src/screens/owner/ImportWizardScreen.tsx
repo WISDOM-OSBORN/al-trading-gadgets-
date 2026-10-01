@@ -252,18 +252,18 @@ export const ImportWizardScreen: React.FC<ImportWizardScreenProps> = ({ onBack }
             </label>
           </div>
 
-          <div className="max-w-md mx-auto text-left bg-slate-50 dark:bg-slate-800/50 p-3 rounded-xl text-xs space-y-1 text-slate-600 dark:text-slate-300">
-            <p className="font-semibold text-slate-900 dark:text-white flex items-center gap-1">
-              <HelpCircle className="w-3.5 h-3.5 text-indigo-500" />
-              Standard CSV Template Columns:
+          <div className="max-w-md mx-auto text-left bg-slate-50 dark:bg-slate-800/50 p-3.5 rounded-xl text-xs space-y-1.5 text-slate-600 dark:text-slate-300">
+            <p className="font-semibold text-slate-900 dark:text-white flex items-center gap-1.5">
+              <HelpCircle className="w-4 h-4 text-emerald-500" />
+              Standard 5-Column CSV Format:
             </p>
-            <p className="font-mono text-[11px] text-slate-500 break-all">
-              sku, name, category, brand, cost_price, selling_price, quantity, reorder_level, barcode, supplier, description
+            <p className="font-mono text-xs font-bold text-emerald-700 dark:text-emerald-400 bg-white dark:bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700">
+              name, category, cost_price, selling_price, quantity
             </p>
-            <p className="text-[11px] text-slate-500 pt-1">
-              &bull; Required fields: <strong>name, selling_price, quantity</strong>.
+            <p className="text-[11px] text-slate-500 pt-0.5 leading-relaxed">
+              &bull; <strong>Auto-Generated SKUs:</strong> The system automatically assigns a unique SKU code (e.g. <code>ALQ-AUX-101</code>) to every item upon import.
               <br />
-              &bull; If SKU is missing, ShopLedger will auto-generate one for you.
+              &bull; <strong>name</strong>, <strong>selling_price</strong>, and <strong>quantity</strong> are required.
             </p>
           </div>
         </div>

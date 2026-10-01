@@ -8,7 +8,7 @@ import {
   query,
   where,
   getDocs,
-  getDocFromServer,
+  setLogLevel,
 } from 'firebase/firestore';
 import {
   getAuth,
@@ -20,29 +20,87 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import { User } from '../types';
 
+// Silence verbose connection retry warnings in console during initial/offline mode
+setLogLevel('error');
+
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const firestore = getFirestore(app, firebaseConfig.firestoreDatabaseId || '(default)');
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
-// Test connection on boot
-export async function testFirestoreConnection(): Promise<boolean> {
+// Business Name & Pre-configured Admin & Seller Accounts
+export const BUSINESS_NAME = 'AL-Q ELECTRICALS';
+
+export const DESIGNATED_USERS: Record<
+  string,
+  { name: string; role: 'owner' | 'seller'; deviceCode: string }
+> = {
+  'wisdomosborn65@gmail.com': {
+    name: 'Wisdom Osborn',
+    role: 'owner',
+    deviceCode: 'D01',
+  },
+};
+
+// Seed default shop and designated accounts into Firestore
+export async function seedFirestoreBusinessDefaults(): Promise<void> {
   try {
-    const testDocRef = doc(firestore, '_health', 'status');
-    await getDocFromServer(testDocRef);
-    return true;
-  } catch (err: any) {
-    if (err?.code === 'not-found' || err?.code === 'permission-denied') {
-      return true;
+    // 1. Seed Shop info
+    const shopRef = doc(firestore, 'shops', 'shop-electrical-01');
+    await setDoc(
+      shopRef,
+      {
+        id: 'shop-electrical-01',
+        name: BUSINESS_NAME,
+        currency: 'GHS',
+        currencySymbol: 'GH₵',
+        phone: '+233 24 123 4567',
+        address: 'Accra, Ghana',
+        taxRate: 0,
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+
+    // 2. Pre-create designated admin and seller records in Firestore
+    for (const [email, info] of Object.entries(DESIGNATED_USERS)) {
+      const uid = `user-${email.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      const userRef = doc(firestore, 'users', uid);
+      await setDoc(
+        userRef,
+        {
+          uid,
+          shopId: 'shop-electrical-01',
+          name: info.name,
+          email,
+          role: info.role,
+          deviceCode: info.deviceCode,
+          active: true,
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      );
     }
-    console.warn('Firestore connection notice:', err?.message || err);
+  } catch (err) {
+    console.warn('Firestore seed notice (offline fallback active):', err);
+  }
+}
+
+// Test connection & provision defaults safely
+export async function testFirestoreConnection(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return false;
+  }
+  try {
+    await seedFirestoreBusinessDefaults();
+    return true;
+  } catch {
     return false;
   }
 }
 
 /**
  * Fetch or authenticate user directly from Firestore.
- * Developers can manage / approve users directly in Firestore `users` collection.
  */
 export async function getOrCreateFirestoreUser(
   email: string,
@@ -50,6 +108,7 @@ export async function getOrCreateFirestoreUser(
   customUid?: string
 ): Promise<User> {
   const normalizedEmail = email.trim().toLowerCase();
+  const designated = DESIGNATED_USERS[normalizedEmail];
   const uid = customUid || `user-${normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
 
   // 1. Try to find user by document ID or email query in Firestore
@@ -61,12 +120,12 @@ export async function getOrCreateFirestoreUser(
       const data = directDoc.data();
       return {
         uid: directDoc.id,
-        shopId: data.shopId || 'shop-01',
-        name: data.name || displayName || normalizedEmail.split('@')[0],
+        shopId: data.shopId || 'shop-electrical-01',
+        name: data.name || designated?.name || displayName || normalizedEmail.split('@')[0],
         email: data.email || normalizedEmail,
-        role: data.role || 'seller',
+        role: designated ? designated.role : (data.role || 'seller'),
         active: data.active !== false,
-        deviceCode: data.deviceCode || 'D01',
+        deviceCode: data.deviceCode || designated?.deviceCode || 'D01',
         createdAt: data.createdAt || Date.now(),
       };
     }
@@ -79,12 +138,12 @@ export async function getOrCreateFirestoreUser(
       const data = docSnap.data();
       return {
         uid: docSnap.id,
-        shopId: data.shopId || 'shop-01',
-        name: data.name || displayName || normalizedEmail.split('@')[0],
+        shopId: data.shopId || 'shop-electrical-01',
+        name: data.name || designated?.name || displayName || normalizedEmail.split('@')[0],
         email: data.email || normalizedEmail,
-        role: data.role || 'seller',
+        role: designated ? designated.role : (data.role || 'seller'),
         active: data.active !== false,
-        deviceCode: data.deviceCode || 'D01',
+        deviceCode: data.deviceCode || designated?.deviceCode || 'D01',
         createdAt: data.createdAt || Date.now(),
       };
     }
@@ -92,28 +151,32 @@ export async function getOrCreateFirestoreUser(
     console.warn('Firestore user fetch notice:', err);
   }
 
-  // 2. Determine initial role: owner if wisdomosborn65@gmail.com or designated developer
-  const isOwner =
-    normalizedEmail === 'wisdomosborn65@gmail.com' ||
-    normalizedEmail.includes('owner') ||
-    normalizedEmail.includes('admin');
+  // 2. Check if this is one of our designated Admins or Seller
+  const role: 'owner' | 'seller' = designated
+    ? designated.role
+    : normalizedEmail.includes('admin') || normalizedEmail.includes('owner')
+    ? 'owner'
+    : 'seller';
+
+  const assignedName = designated?.name || displayName || (role === 'owner' ? 'Admin' : 'Seller');
+  const deviceCode = designated?.deviceCode || (role === 'owner' ? 'D01' : 'D03');
 
   const newUser: User = {
     uid,
-    shopId: 'shop-01',
-    name: displayName || (isOwner ? 'Store Owner' : 'Staff Manager'),
+    shopId: 'shop-electrical-01',
+    name: assignedName,
     email: normalizedEmail,
-    role: isOwner ? 'owner' : 'seller',
+    role,
     active: true,
-    deviceCode: isOwner ? 'D01' : 'D02',
+    deviceCode,
     createdAt: Date.now(),
   };
 
-  // 3. Save new user to Firestore so developer can view and manage in Firebase console
+  // 3. Save new user to Firestore
   try {
     await setDoc(doc(firestore, 'users', uid), newUser, { merge: true });
   } catch (err) {
-    console.warn('Could not write new user to Firestore:', err);
+    console.warn('Could not write user to Firestore:', err);
   }
 
   return newUser;

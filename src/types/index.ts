@@ -7,6 +7,13 @@ export interface ShopSettings {
   receiptFooter: string;
   lowStockThresholdDefault: number;
   taxRatePercent: number;
+  // Security PIN to edit shop name & address
+  editPin?: string;
+  // Daily Closing Report settings
+  closingTime?: string; // e.g. '20:00' (8:00 PM GMT)
+  closingReportEmail?: string;
+  closingReportWhatsapp?: string;
+  autoDispatchReport?: boolean;
 }
 
 export interface Shop {
@@ -168,6 +175,7 @@ export type AuditAction =
   | 'import_undone' 
   | 'seller_created' 
   | 'seller_updated' 
+  | 'seller_deleted' 
   | 'settings_updated'
   | 'day_closed'
   | 'user_login';

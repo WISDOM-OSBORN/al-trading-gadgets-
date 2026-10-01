@@ -3,17 +3,11 @@ import { Item, InventoryImportHistory } from '../types';
 import { db } from '../db';
 
 export const CSV_TEMPLATE_HEADERS = [
-  'sku',
   'name',
   'category',
-  'brand',
   'cost_price',
   'selling_price',
   'quantity',
-  'reorder_level',
-  'barcode',
-  'supplier',
-  'description',
 ];
 
 export interface CSVRowValidationError {
@@ -108,10 +102,23 @@ export function parseCSVFile(
               return;
             }
 
-            // Auto-generate SKU if absent
+            // Auto-generate unique SKU if absent (e.g. ALQ-AUX-101)
             if (!sku) {
-              const prefix = name.replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCase() || 'ITM';
-              sku = `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+              const words = name.replace(/[^A-Za-z0-9 ]/g, '').trim().split(/\s+/).filter(Boolean);
+              let prefix = 'ITM';
+              if (words.length >= 2) {
+                prefix = (words[0].slice(0, 2) + words[1].slice(0, 2)).toUpperCase();
+              } else if (words.length === 1 && words[0].length >= 3) {
+                prefix = words[0].slice(0, 3).toUpperCase();
+              } else if (category) {
+                prefix = category.replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCase() || 'ITM';
+              }
+              let randomNum = Math.floor(100 + Math.random() * 900);
+              sku = `ALQ-${prefix}-${randomNum}`;
+              while (seenSkusInFile.has(sku.toUpperCase())) {
+                randomNum = Math.floor(100 + Math.random() * 900);
+                sku = `ALQ-${prefix}-${randomNum}`;
+              }
             }
 
             // Check duplicate SKU inside the uploaded file itself
@@ -443,19 +450,20 @@ export async function exportInventoryToCSV(shopId: string): Promise<string> {
   return Papa.unparse(exportData);
 }
 
-// Generate CSV template with sample items in Ghanaian Cedis (GH₵)
+// Generate CSV template with simple sample items in Ghanaian Cedis (GH₵)
 export function generateSampleTemplateCSV(): string {
   return Papa.unparse({
-    fields: CSV_TEMPLATE_HEADERS,
+    fields: ['name', 'category', 'cost_price', 'selling_price', 'quantity'],
     data: [
-      ['CHG-20W-ANK', 'Anker 20W USB-C Nano PowerPort Adapter', 'Chargers & Adapters', 'Anker', '85.00', '140.00', '45', '10', '848061023451', 'Apex Tech Distro', 'Fast charger for iPhone and Android'],
-      ['CAB-TC-1M', 'Braided Type-C to Type-C 60W Cable (1m)', 'Cables & Leads', 'Oraimo', '25.00', '45.00', '80', '15', '693417770101', 'Transsion Acc Ltd', 'Heavy duty nylon braided PD cord'],
-      ['PB-10000-ORA', 'Oraimo 10,000mAh Toast 10 Power Bank', 'Power Banks', 'Oraimo', '180.00', '260.00', '34', '8', '489518074901', 'Transsion Acc Ltd', 'Dual output with LED power display'],
-      ['EXT-4WAY-2M', 'Schneider 4-Gang Surge Protected Socket (2m)', 'Extension Sockets', 'Schneider', '95.00', '150.00', '22', '6', '501234567891', 'VoltMaster Electricals', 'Surge suppression neon switches'],
-      ['BLB-LED-9W-E27', 'Philips 9W Warm White LED Bulb E27 Screw', 'Lighting & Bulbs', 'Philips', '20.00', '35.00', '50', '12', '871869970001', 'Lumen Electricals', 'A60 shape 806 lumens energy saver'],
-      ['EAR-BT-ORA', 'Oraimo FreePods 4 ANC TWS Earbuds', 'Audio & Earphones', 'Oraimo', '220.00', '320.00', '26', '6', '489518074001', 'Transsion Acc Ltd', 'Active Noise Cancelling Bluetooth 5.2'],
-      ['BAT-AA-4PK', 'Duracell Ultra Alkaline AA Batteries (Pack of 4)', 'Batteries & Cells', 'Duracell', '30.00', '50.00', '90', '20', '500039401201', 'VoltMaster Electricals', 'High drain long life power cells'],
-      ['SCK-13A-DP', 'British General 13A Double Switched Wall Socket', 'Switches & Sockets', 'BG Electrical', '40.00', '70.00', '40', '10', '502123400103', 'VoltMaster Electricals', 'Standard UK 13A socket outlet'],
+      ['3.5mm Male-to-Male Audio Aux Cable (1.2m)', 'Audio & Cables', '15.00', '30.00', '50'],
+      ['Anker 20W USB-C Nano PowerPort Adapter', 'Chargers & Adapters', '85.00', '140.00', '45'],
+      ['Braided Type-C to Type-C 60W Cable (1m)', 'Cables & Leads', '25.00', '45.00', '80'],
+      ['Oraimo 10,000mAh Toast 10 Power Bank', 'Power Banks', '180.00', '260.00', '34'],
+      ['Schneider 4-Gang Surge Protected Socket (2m)', 'Extension Sockets', '95.00', '150.00', '22'],
+      ['Philips 9W Warm White LED Bulb E27 Screw', 'Lighting & Bulbs', '20.00', '35.00', '60'],
+      ['Oraimo FreePods 4 ANC TWS Earbuds', 'Audio & Earphones', '220.00', '320.00', '26'],
+      ['Duracell Ultra Alkaline AA Batteries (Pack of 4)', 'Batteries & Cells', '30.00', '50.00', '90'],
+      ['British General 13A Double Switched Wall Socket', 'Switches & Sockets', '40.00', '70.00', '40'],
     ],
   });
 }

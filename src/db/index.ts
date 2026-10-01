@@ -53,7 +53,7 @@ export async function initializeDatabase() {
   if (shopCount === 0) {
     const defaultShop: Shop = {
       id: SEED_SHOP_ID,
-      name: 'VoltCraft Electrical & Gadgets',
+      name: 'AL-Q ELECTRICALS',
       currency: 'GHS',
       currencySymbol: 'GH₵',
       phone: '+233 24 123 4567',
@@ -63,18 +63,18 @@ export async function initializeDatabase() {
         allowPriceOverride: true,
         allowNegativeStock: false,
         invoicePrefix: 'INV',
-        receiptFooter: 'Thank you for shopping with us! Quality electrical gadgets & accessories.',
+        receiptFooter: 'Thank you for shopping at AL-Q ELECTRICALS! Quality electrical gadgets & accessories.',
         lowStockThresholdDefault: 8,
         taxRatePercent: 0,
       },
       createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
     };
 
-    const defaultOwner: User = {
-      uid: 'user-owner-01',
+    const ownerUser: User = {
+      uid: 'user-wisdomosborn65',
       shopId: SEED_SHOP_ID,
-      name: 'Alex Rivera (Owner)',
-      email: 'owner@shopledger.app',
+      name: 'Wisdom Osborn',
+      email: 'wisdomosborn65@gmail.com',
       role: 'owner',
       active: true,
       deviceCode: 'D01',
@@ -82,20 +82,8 @@ export async function initializeDatabase() {
       createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
     };
 
-    const defaultSeller: User = {
-      uid: 'user-seller-01',
-      shopId: SEED_SHOP_ID,
-      name: 'Samira Chen (Staff)',
-      email: 'seller@shopledger.app',
-      role: 'seller',
-      active: true,
-      deviceCode: 'D02',
-      pin: '2026',
-      createdAt: Date.now() - 25 * 24 * 60 * 60 * 1000,
-    };
-
     await db.shops.add(defaultShop);
-    await db.users.bulkAdd([defaultOwner, defaultSeller]);
+    await db.users.add(ownerUser);
 
     // Populate initial items
     const now = Date.now();
@@ -121,8 +109,8 @@ export async function initializeDatabase() {
       previousQty: 0,
       newQty: item.quantity,
       reason: 'Initial stock intake',
-      userId: defaultOwner.uid,
-      userName: defaultOwner.name,
+      userId: ownerUser.uid,
+      userName: ownerUser.name,
       createdAt: now - 20 * 24 * 60 * 60 * 1000,
     }));
     await db.stockMovements.bulkAdd(movements);
@@ -133,7 +121,7 @@ export async function initializeDatabase() {
         id: 'cust-1',
         shopId: SEED_SHOP_ID,
         name: 'David K. Osei',
-        phone: '+1 (555) 774-2190',
+        phone: '+233 24 774 2190',
         balanceOwed: 25.00,
         createdAt: now - 10 * 24 * 60 * 60 * 1000,
         updatedAt: now - 2 * 24 * 60 * 60 * 1000,
@@ -142,7 +130,7 @@ export async function initializeDatabase() {
         id: 'cust-2',
         shopId: SEED_SHOP_ID,
         name: 'Marcus Vance',
-        phone: '+1 (555) 881-3324',
+        phone: '+233 20 881 3324',
         balanceOwed: 0,
         createdAt: now - 5 * 24 * 60 * 60 * 1000,
         updatedAt: now - 5 * 24 * 60 * 60 * 1000,
@@ -156,8 +144,8 @@ export async function initializeDatabase() {
         id: 'sale-demo-01',
         invoiceNo: 'INV-D01-0001',
         shopId: SEED_SHOP_ID,
-        sellerId: defaultSeller.uid,
-        sellerName: defaultSeller.name,
+        sellerId: ownerUser.uid,
+        sellerName: ownerUser.name,
         customerName: 'Walk-in Customer',
         lines: [
           {
@@ -171,9 +159,9 @@ export async function initializeDatabase() {
             lineTotal: 15.00,
           },
           {
-            itemId: itemRecords[5].id,
-            name: itemRecords[5].name,
-            sku: itemRecords[5].sku,
+            itemId: itemRecords[4].id,
+            name: itemRecords[4].name,
+            sku: itemRecords[4].sku,
             qty: 2,
             unitPrice: 5.50,
             costPriceAtSale: 2.20,
@@ -195,10 +183,10 @@ export async function initializeDatabase() {
         id: 'sale-demo-02',
         invoiceNo: 'INV-D02-0002',
         shopId: SEED_SHOP_ID,
-        sellerId: defaultSeller.uid,
-        sellerName: defaultSeller.name,
+        sellerId: ownerUser.uid,
+        sellerName: ownerUser.name,
         customerName: 'Marcus Vance',
-        customerPhone: '+1 (555) 881-3324',
+        customerPhone: '+233 20 881 3324',
         lines: [
           {
             itemId: itemRecords[11].id,
@@ -235,10 +223,10 @@ export async function initializeDatabase() {
         id: 'sale-demo-03',
         invoiceNo: 'INV-D01-0003',
         shopId: SEED_SHOP_ID,
-        sellerId: defaultOwner.uid,
-        sellerName: defaultOwner.name,
+        sellerId: ownerUser.uid,
+        sellerName: ownerUser.name,
         customerName: 'David K. Osei',
-        customerPhone: '+1 (555) 774-2190',
+        customerPhone: '+233 24 774 2190',
         lines: [
           {
             itemId: itemRecords[1].id,
@@ -268,8 +256,8 @@ export async function initializeDatabase() {
         id: 'sale-demo-04',
         invoiceNo: 'INV-D02-0004',
         shopId: SEED_SHOP_ID,
-        sellerId: defaultSeller.uid,
-        sellerName: defaultSeller.name,
+        sellerId: ownerUser.uid,
+        sellerName: ownerUser.name,
         customerName: 'Walk-in Customer',
         lines: [
           {
@@ -313,21 +301,66 @@ export async function initializeDatabase() {
       action: 'inventory_imported',
       entity: 'items',
       entityId: 'all',
-      userId: defaultOwner.uid,
-      userName: defaultOwner.name,
+      userId: ownerUser.uid,
+      userName: ownerUser.name,
       meta: { count: itemRecords.length },
       createdAt: now - 20 * 24 * 60 * 60 * 1000,
     });
   } else {
-    // Ensure existing shop has Ghanaian Cedi
+    // Ensure existing shop has AL-Q ELECTRICALS and Ghanaian Cedi
     const existing = await db.shops.toCollection().first();
-    if (existing && (existing.currency !== 'GHS' || existing.currencySymbol !== 'GH₵')) {
+    if (existing) {
       await db.shops.update(existing.id, {
+        name: 'AL-Q ELECTRICALS',
         currency: 'GHS',
         currencySymbol: 'GH₵',
       });
     }
+
+    // Ensure owner account exists in local DB
+    const shopId = existing?.id || SEED_SHOP_ID;
+    await db.users.put({
+      uid: 'user-wisdomosborn65',
+      shopId,
+      name: 'Wisdom Osborn',
+      email: 'wisdomosborn65@gmail.com',
+      role: 'owner',
+      active: true,
+      deviceCode: 'D01',
+      pin: '1234',
+      createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+    });
   }
+}
+
+// Purge dummy/sample inventory, sales, and dummy accounts for clean production
+export async function purgeDummyData(): Promise<void> {
+  await db.transaction('rw', [
+    db.items,
+    db.sales,
+    db.stockMovements,
+    db.customers,
+    db.customerPayments,
+    db.imports,
+    db.dailyReports,
+    db.users,
+  ], async () => {
+    await db.items.clear();
+    await db.sales.clear();
+    await db.stockMovements.clear();
+    await db.customers.clear();
+    await db.customerPayments.clear();
+    await db.imports.clear();
+    await db.dailyReports.clear();
+
+    // Delete dummy accounts, keeping only the owner
+    const allUsers = await db.users.toArray();
+    for (const u of allUsers) {
+      if (u.email === 'rajifarrid@gmail.com' || u.email === 'abuyahwisdomosborn@gmail.com') {
+        await db.users.delete(u.uid);
+      }
+    }
+  });
 }
 
 // Reset database utility

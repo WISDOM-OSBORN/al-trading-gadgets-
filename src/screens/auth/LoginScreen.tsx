@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
-import { Zap, Shield, Sun, Moon } from 'lucide-react';
+import { Zap, Sun, Moon, Lock } from 'lucide-react';
 
 export const LoginScreen: React.FC = () => {
-  const { loginWithGoogle, loginWithGmail, switchUser } = useAuth();
+  const { loginWithGoogle, loginWithGmail } = useAuth();
   const { isDark, toggleTheme } = useTheme();
   const [gmail, setGmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -50,18 +50,22 @@ export const LoginScreen: React.FC = () => {
         {isDark ? <Sun className="w-4 h-4 fill-amber-400" /> : <Moon className="w-4 h-4" />}
       </button>
 
-      <div className="w-full max-w-sm space-y-5">
+      <div className="w-full max-w-sm space-y-4">
         {/* Brand */}
         <div className="text-center space-y-1">
-          <div className="w-12 h-12 mx-auto rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-lg">
+          <div className="w-12 h-12 mx-auto rounded-2xl bg-emerald-600 text-white flex items-center justify-center shadow-lg">
             <Zap className="w-6 h-6 fill-current" />
           </div>
-          <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">ShopLedger</h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400">Ghana Sales & Inventory Platform</p>
+          <h1 className="text-xl font-black tracking-tight text-slate-900 dark:text-white">
+            AL-Q ELECTRICALS
+          </h1>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Sales & Inventory Management Platform
+          </p>
         </div>
 
-        {/* 1. Google / Gmail Sign In Button */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-sm space-y-3">
+        {/* 1. Google / Gmail Sign In */}
+        <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200 dark:border-slate-800 shadow-sm space-y-3.5">
           <button
             onClick={handleGoogleSignIn}
             disabled={isLoading}
@@ -97,14 +101,14 @@ export const LoginScreen: React.FC = () => {
           </div>
 
           {/* 2. Direct Gmail Input (Authenticated from Firestore) */}
-          <form onSubmit={handleGmailSubmit} className="space-y-2 text-xs">
+          <form onSubmit={handleGmailSubmit} className="space-y-2.5 text-xs">
             <input
               type="email"
               required
               value={gmail}
               onChange={(e) => setGmail(e.target.value)}
-              placeholder="e.g. wisdomosborn65@gmail.com"
-              className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+              placeholder="e.g. yourname@gmail.com"
+              className="w-full px-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
             />
 
             {error && <p className="text-[11px] text-rose-500 font-medium">{error}</p>}
@@ -112,41 +116,17 @@ export const LoginScreen: React.FC = () => {
             <button
               type="submit"
               disabled={isLoading || !gmail.trim()}
-              className="w-full py-2 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition cursor-pointer disabled:opacity-50 shadow-sm"
+              className="w-full py-2.5 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition cursor-pointer disabled:opacity-50 shadow-sm"
             >
               {isLoading ? 'Connecting...' : 'Enter with Gmail'}
             </button>
           </form>
         </div>
 
-        {/* 3. Quick Demo Roles */}
-        <div className="space-y-1.5 pt-1">
-          <span className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-500 tracking-wider block text-center">
-            Quick Demo Accounts
-          </span>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => switchUser('user-owner-01')}
-              className="p-2.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-left transition cursor-pointer shadow-2xs"
-            >
-              <p className="font-bold text-xs text-slate-900 dark:text-white flex items-center gap-1">
-                <Shield className="w-3 h-3 text-indigo-500" />
-                Owner
-              </p>
-              <p className="text-[10px] text-slate-500 dark:text-slate-400">Alex Rivera</p>
-            </button>
-
-            <button
-              onClick={() => switchUser('user-seller-01')}
-              className="p-2.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-left transition cursor-pointer shadow-2xs"
-            >
-              <p className="font-bold text-xs text-slate-900 dark:text-white flex items-center gap-1">
-                <Zap className="w-3 h-3 text-emerald-500" />
-                Seller
-              </p>
-              <p className="text-[10px] text-slate-500 dark:text-slate-400">Samira Chen</p>
-            </button>
-          </div>
+        {/* Security badge footer */}
+        <div className="text-center pt-2 flex items-center justify-center gap-1.5 text-[11px] text-slate-400 dark:text-slate-500">
+          <Lock className="w-3.5 h-3.5" />
+          <span>Authorized shop staff authentication</span>
         </div>
       </div>
     </div>
