@@ -3,7 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { User, Sale } from '../../types';
 import { db, purgeDummyData, resetDatabaseWithSeed, deleteAllCashierStaffAccounts } from '../../db';
-import { firestore } from '../../db/firebase';
+import { firestore, sanitizeForFirestore } from '../../db/firebase';
 import { doc, deleteDoc, setDoc } from 'firebase/firestore';
 import { formatDateTime } from '../../utils/formatters';
 import {
@@ -264,10 +264,10 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       const userRef = doc(firestore, 'users', newUid);
       await setDoc(
         userRef,
-        {
+        sanitizeForFirestore({
           ...newUser,
           updatedAt: Date.now(),
-        },
+        }),
         { merge: true }
       );
     } catch {

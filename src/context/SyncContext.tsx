@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { db } from '../db';
-import { processSyncQueue } from '../db/sync';
+import { processSyncQueue, syncAllInventoryToFirestore } from '../db/sync';
 
 interface SyncContextType {
   isOnline: boolean;
@@ -49,6 +49,12 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const result = await processSyncQueue();
 
+      // Ensure all inventory items, imports, and withdrawals are synced to Cloud Firestore
+      const shop = await db.shops.toCollection().first();
+      if (shop) {
+        await syncAllInventoryToFirestore(shop.id);
+      }
+
       if (result.synced > 0) {
         setSyncBannerMessage(`All synced (${result.synced} item${result.synced > 1 ? 's' : ''})`);
         setLastSyncedTime(Date.now());
@@ -58,9 +64,9 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       await refreshPendingCount();
-    } catch (err) {
-      console.error('Sync failed:', err);
-      setSyncBannerMessage('Sync error — will retry automatically');
+    } catch (err: any) {
+      console.warn('Sync notice (offline/retry):', err?.message || err);
+      setSyncBannerMessage('Offline Mode — will retry sync when reconnected');
       setTimeout(() => setSyncBannerMessage(null), 4000);
     } finally {
       setIsSyncing(false);

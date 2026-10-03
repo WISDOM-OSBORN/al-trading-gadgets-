@@ -1,6 +1,7 @@
 import Papa from 'papaparse';
 import { Item, InventoryImportHistory } from '../types';
 import { db } from '../db';
+import { syncAllInventoryToFirestore } from '../db/sync';
 
 export const CSV_TEMPLATE_HEADERS = [
   'name',
@@ -318,7 +319,7 @@ export async function executeBatchImport(params: {
               id: newItemId,
               shopId,
               sku: row.sku,
-              barcode: row.barcode || undefined,
+              barcode: row.barcode || '',
               name: row.name,
               category: row.category,
               brand: row.brand,
@@ -326,8 +327,8 @@ export async function executeBatchImport(params: {
               sellingPrice: row.sellingPrice,
               quantity: row.quantity,
               reorderLevel: row.reorderLevel,
-              supplier: row.supplier || undefined,
-              description: row.description || undefined,
+              supplier: row.supplier || '',
+              description: row.description || '',
               archived: false,
               createdAt: now,
               updatedAt: now,
@@ -400,6 +401,13 @@ export async function executeBatchImport(params: {
     },
     createdAt: now,
   });
+
+  // Automatically sync newly imported items and import record to Firebase Firestore
+  try {
+    await syncAllInventoryToFirestore(shopId);
+  } catch (syncErr) {
+    console.warn('Background sync to Firestore scheduled:', syncErr);
+  }
 
   return importRecord;
 }

@@ -2,20 +2,30 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSync } from '../../context/SyncContext';
 import { useTheme } from '../../context/ThemeContext';
+import { ScreenId } from './BottomNav';
 import { Lock, LogOut, ChevronDown, RefreshCw, Sun, Moon } from 'lucide-react';
 
-export const Header: React.FC = () => {
+interface HeaderProps {
+  onNavigate?: (screen: ScreenId) => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({ onNavigate }) => {
   const { currentUser, currentShop, lockScreen, logout } = useAuth();
   const { isOnline, isSyncing, pendingSyncCount, triggerSync } = useSync();
   const { isDark, toggleTheme } = useTheme();
   const [showMenu, setShowMenu] = useState(false);
+  const isOwner = currentUser?.role === 'owner';
 
   return (
     <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 border-b border-slate-200 dark:border-slate-800 px-3 py-2 transition-colors">
       <div className="max-w-7xl mx-auto flex items-center justify-between">
         {/* Left: Minimal Brand */}
-        <div className="flex items-center gap-2">
-          <span className="font-black text-sm text-slate-900 dark:text-white tracking-tight">
+        <div
+          onClick={() => onNavigate?.(isOwner ? 'dashboard' : 'sell')}
+          className="flex items-center gap-2 cursor-pointer select-none group"
+          title={isOwner ? 'Go to Owner Dashboard' : 'Go to Sell Screen'}
+        >
+          <span className="font-black text-sm text-slate-900 dark:text-white tracking-tight group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition">
             {currentShop?.name || 'AL-Q ELECTRICALS'}
           </span>
           <span

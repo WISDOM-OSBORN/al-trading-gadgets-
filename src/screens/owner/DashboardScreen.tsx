@@ -40,7 +40,7 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
 
   // Restock modal state
   const [restockItem, setRestockItem] = useState<Item | null>(null);
-  const [restockAmount, setRestockAmount] = useState<number>(10);
+  const [restockAmount, setRestockAmount] = useState<number | ''>(10);
   const [isRestocking, setIsRestocking] = useState(false);
 
   const loadData = async () => {
@@ -189,9 +189,12 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
   // Handle Restock action directly from dashboard
   const handleRestock = async () => {
     if (!restockItem || !currentShop) return;
+    const numRestock = typeof restockAmount === 'number' ? restockAmount : parseInt(restockAmount, 10) || 0;
+    if (numRestock <= 0) return;
+
     try {
       setIsRestocking(true);
-      const newQty = restockItem.quantity + restockAmount;
+      const newQty = restockItem.quantity + numRestock;
       await db.items.update(restockItem.id, {
         quantity: newQty,
         updatedAt: Date.now(),
@@ -203,7 +206,7 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
         itemName: restockItem.name,
         itemSku: restockItem.sku,
         type: 'restock',
-        qtyChange: restockAmount,
+        qtyChange: numRestock,
         previousQty: restockItem.quantity,
         newQty,
         reason: 'Dashboard Quick Restock',
@@ -614,9 +617,19 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
               </label>
               <input
                 type="number"
-                min="1"
+                min="0"
                 value={restockAmount}
-                onChange={(e) => setRestockAmount(Math.max(1, parseInt(e.target.value) || 1))}
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === '') {
+                    setRestockAmount('');
+                  } else {
+                    const p = parseInt(val, 10);
+                    setRestockAmount(isNaN(p) ? '' : p);
+                  }
+                }}
+                placeholder="0"
                 className="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold"
               />
             </div>
@@ -633,7 +646,9 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
                 disabled={isRestocking}
                 className="flex-1 py-2 text-xs font-bold rounded-xl bg-emerald-600 text-white shadow-sm hover:bg-emerald-700 transition"
               >
-                {isRestocking ? 'Restocking...' : `Add +${restockAmount} Units`}
+                {isRestocking
+                  ? 'Restocking...'
+                  : `Add +${typeof restockAmount === 'number' ? restockAmount : parseInt(restockAmount, 10) || 0} Units`}
               </button>
             </div>
           </div>

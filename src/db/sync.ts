@@ -1,6 +1,6 @@
 import { db } from './index';
-import { firestore } from './firebase';
-import { doc, setDoc } from 'firebase/firestore';
+import { firestore, sanitizeForFirestore } from './firebase';
+import { doc, setDoc, writeBatch } from 'firebase/firestore';
 import {
   Sale,
   SaleLineItem,
@@ -426,10 +426,14 @@ export async function processSyncQueue(): Promise<{ synced: number; remaining: n
 
       // Sync to live Firestore database
       if (item.entity === 'sale' && item.payload?.id) {
-        await setDoc(doc(firestore, 'sales', item.payload.id), item.payload, { merge: true });
+        await setDoc(doc(firestore, 'sales', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
         await db.sales.update(item.payload.id, { syncedAt: Date.now() });
       } else if (item.entity === 'item' && item.payload?.id) {
-        await setDoc(doc(firestore, 'items', item.payload.id), item.payload, { merge: true });
+        await setDoc(doc(firestore, 'items', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
+      } else if (item.entity === 'withdrawal' && item.payload?.id) {
+        await setDoc(doc(firestore, 'withdrawals', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
+      } else if (item.entity === 'import' && item.payload?.id) {
+        await setDoc(doc(firestore, 'imports', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
       }
 
       await db.syncQueue.update(item.id, {
@@ -448,4 +452,43 @@ export async function processSyncQueue(): Promise<{ synced: number; remaining: n
 
   const remaining = await db.syncQueue.where('status').equals('pending').count();
   return { synced: syncedCount, remaining };
+}
+
+// Bulk sync all shop items and import records to Firestore
+export async function syncAllInventoryToFirestore(
+  shopId: string
+): Promise<{ count: number; error?: string }> {
+  if (!navigator.onLine) {
+    return { count: 0, error: 'Device is offline' };
+  }
+
+  try {
+    const allItems = await db.items.where('shopId').equals(shopId).toArray();
+    if (allItems.length > 0) {
+      const batchSize = 400;
+      for (let i = 0; i < allItems.length; i += batchSize) {
+        const chunk = allItems.slice(i, i + batchSize);
+        const batch = writeBatch(firestore);
+        for (const it of chunk) {
+          batch.set(doc(firestore, 'items', it.id), sanitizeForFirestore(it), { merge: true });
+        }
+        await batch.commit();
+      }
+    }
+
+    const allImports = await db.imports.where('shopId').equals(shopId).toArray();
+    for (const imp of allImports) {
+      await setDoc(doc(firestore, 'imports', imp.id), sanitizeForFirestore(imp), { merge: true });
+    }
+
+    const allWithdrawals = await db.withdrawals.where('shopId').equals(shopId).toArray();
+    for (const w of allWithdrawals) {
+      await setDoc(doc(firestore, 'withdrawals', w.id), sanitizeForFirestore(w), { merge: true });
+    }
+
+    return { count: allItems.length };
+  } catch (err: any) {
+    console.warn('Firestore sync notice (offline mode active):', err?.message || err);
+    return { count: 0, error: err?.message || 'Sync error' };
+  }
 }

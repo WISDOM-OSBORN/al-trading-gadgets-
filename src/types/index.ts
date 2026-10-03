@@ -211,7 +211,7 @@ export interface AuditLog {
 
 export interface SyncQueueItem {
   id: string;
-  entity: 'sale' | 'stockMovement' | 'item' | 'customer' | 'customerPayment' | 'auditLog';
+  entity: 'sale' | 'stockMovement' | 'item' | 'customer' | 'customerPayment' | 'auditLog' | 'withdrawal' | 'import';
   action: 'create' | 'update' | 'delete';
   payload: any;
   attempts: number;

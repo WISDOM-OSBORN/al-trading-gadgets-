@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getFirestore,
+  initializeFirestore,
   doc,
   getDoc,
   setDoc,
@@ -22,13 +23,42 @@ import firebaseConfig from '../../firebase-applet-config.json';
 import { User } from '../types';
 import { db } from './index';
 
-// Silence verbose connection retry warnings in console during initial/offline mode
-setLogLevel('error');
+// Silence internal Firestore connection logs so offline fallback works seamlessly without noisy console errors
+setLogLevel('silent');
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-export const firestore = getFirestore(app, firebaseConfig.firestoreDatabaseId || '(default)');
+export const firestore = initializeFirestore(
+  app,
+  {
+    experimentalForceLongPolling: true,
+  },
+  firebaseConfig.firestoreDatabaseId || '(default)'
+);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+
+/**
+ * Recursively removes all `undefined` values from an object or array,
+ * because Firebase Firestore throws an error if any field is `undefined`.
+ */
+export function sanitizeForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) {
+    return null as any;
+  }
+  if (Array.isArray(data)) {
+    return data.map((item) => sanitizeForFirestore(item)) as any;
+  }
+  if (typeof data === 'object') {
+    const clean: Record<string, any> = {};
+    for (const [key, value] of Object.entries(data as Record<string, any>)) {
+      if (value !== undefined) {
+        clean[key] = sanitizeForFirestore(value);
+      }
+    }
+    return clean as T;
+  }
+  return data;
+}
 
 // Business Name & Pre-configured Admin Accounts
 export const BUSINESS_NAME = 'AL-Q ELECTRICALS';

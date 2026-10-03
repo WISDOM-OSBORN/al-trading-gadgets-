@@ -43,7 +43,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
 
   // Stock Adjustment Modal
   const [adjustingItem, setAdjustingItem] = useState<Item | null>(null);
-  const [adjustQtyChange, setAdjustQtyChange] = useState<number>(0);
+  const [adjustQtyChange, setAdjustQtyChange] = useState<number | ''>(0);
   const [adjustReasonType, setAdjustReasonType] = useState<StockMovementType>('restock');
   const [adjustNotes, setAdjustNotes] = useState('');
   const [isSubmittingAdjust, setIsSubmittingAdjust] = useState(false);
@@ -51,7 +51,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
   // Owner Withdraw Modal State
   const [isWithdrawModalOpen, setIsWithdrawModalOpen] = useState(false);
   const [withdrawingItem, setWithdrawingItem] = useState<Item | null>(null);
-  const [withdrawQty, setWithdrawQty] = useState<number>(1);
+  const [withdrawQty, setWithdrawQty] = useState<number | ''>(1);
   const [withdrawReason, setWithdrawReason] = useState<string>('Personal use by Owner');
   const [withdrawNotes, setWithdrawNotes] = useState<string>('');
   const [isSubmittingWithdraw, setIsSubmittingWithdraw] = useState<boolean>(false);
@@ -220,14 +220,15 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
   // Handle Stock Adjustment Submit
   const handleExecuteAdjustment = async () => {
     if (!adjustingItem || !currentShop || !currentUser) return;
-    if (adjustQtyChange === 0) return;
+    const numChange = typeof adjustQtyChange === 'number' ? adjustQtyChange : parseInt(adjustQtyChange, 10) || 0;
+    if (numChange === 0) return;
 
     try {
       setIsSubmittingAdjust(true);
       await adjustStock({
         shopId: currentShop.id,
         itemId: adjustingItem.id,
-        qtyChange: adjustQtyChange,
+        qtyChange: numChange,
         reasonType: adjustReasonType as any,
         notes: adjustNotes || adjustReasonType,
         userId: currentUser.uid,
@@ -247,11 +248,12 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
   const handleExecuteWithdrawal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!withdrawingItem || !currentShop || !currentUser) return;
-    if (withdrawQty <= 0) {
+    const numWithdrawQty = typeof withdrawQty === 'number' ? withdrawQty : parseInt(withdrawQty, 10) || 0;
+    if (numWithdrawQty <= 0) {
       setWithdrawError('Quantity to withdraw must be at least 1.');
       return;
     }
-    if (withdrawQty > withdrawingItem.quantity) {
+    if (numWithdrawQty > withdrawingItem.quantity) {
       setWithdrawError(`Cannot withdraw more than available stock (${withdrawingItem.quantity}).`);
       return;
     }
@@ -266,7 +268,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
       const record = await recordOwnerWithdrawal({
         shopId: currentShop.id,
         itemId: withdrawingItem.id,
-        quantity: withdrawQty,
+        quantity: numWithdrawQty,
         reason: combinedReason,
         userId: currentUser.uid,
         userName: currentUser.name,
@@ -739,7 +741,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                     </span>
                     <span className="font-black text-amber-700 dark:text-amber-400">
                       {formatCurrency(
-                        (withdrawingItem.costPrice || 0) * withdrawQty,
+                        (withdrawingItem.costPrice || 0) *
+                          (typeof withdrawQty === 'number'
+                            ? withdrawQty
+                            : parseInt(withdrawQty, 10) || 0),
                         currentShop?.currency
                       )}
                     </span>
@@ -754,11 +759,21 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                 </label>
                 <input
                   type="number"
-                  min="1"
+                  min="0"
                   max={withdrawingItem?.quantity || 9999}
                   required
                   value={withdrawQty}
-                  onChange={(e) => setWithdrawQty(parseInt(e.target.value) || 1)}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '') {
+                      setWithdrawQty('');
+                    } else {
+                      const p = parseInt(val, 10);
+                      setWithdrawQty(isNaN(p) ? '' : p);
+                    }
+                  }}
+                  placeholder="0"
                   className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold text-sm text-slate-900 dark:text-white"
                 />
               </div>
@@ -867,12 +882,25 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                 <input
                   type="number"
                   value={adjustQtyChange}
-                  onChange={(e) => setAdjustQtyChange(parseInt(e.target.value) || 0)}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '' || val === '-') {
+                      setAdjustQtyChange(val as any);
+                    } else {
+                      const p = parseInt(val, 10);
+                      setAdjustQtyChange(isNaN(p) ? '' : p);
+                    }
+                  }}
                   placeholder="+10 or -5"
                   className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold"
                 />
                 <p className="text-[10px] text-slate-500 mt-1">
-                  New stock will be: {adjustingItem.quantity + adjustQtyChange}
+                  New stock will be:{' '}
+                  {adjustingItem.quantity +
+                    (typeof adjustQtyChange === 'number'
+                      ? adjustQtyChange
+                      : parseInt(adjustQtyChange, 10) || 0)}
                 </p>
               </div>
 
@@ -989,9 +1017,13 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                     type="number"
                     step="0.01"
                     min="0"
-                    value={editingItem.costPrice ?? ''}
+                    value={editingItem.costPrice === undefined ? '' : editingItem.costPrice}
+                    onFocus={(e) => e.target.select()}
                     onChange={(e) =>
-                      setEditingItem({ ...editingItem, costPrice: parseFloat(e.target.value) || 0 })
+                      setEditingItem({
+                        ...editingItem,
+                        costPrice: e.target.value === '' ? ('' as any) : parseFloat(e.target.value) || 0,
+                      })
                     }
                     className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
                   />
@@ -1005,11 +1037,12 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                     step="0.01"
                     min="0"
                     required
-                    value={editingItem.sellingPrice ?? ''}
+                    value={editingItem.sellingPrice === undefined ? '' : editingItem.sellingPrice}
+                    onFocus={(e) => e.target.select()}
                     onChange={(e) =>
                       setEditingItem({
                         ...editingItem,
-                        sellingPrice: parseFloat(e.target.value) || 0,
+                        sellingPrice: e.target.value === '' ? ('' as any) : parseFloat(e.target.value) || 0,
                       })
                     }
                     className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold"
@@ -1025,9 +1058,13 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                   <input
                     type="number"
                     min="0"
-                    value={editingItem.quantity ?? ''}
+                    value={editingItem.quantity === undefined ? '' : editingItem.quantity}
+                    onFocus={(e) => e.target.select()}
                     onChange={(e) =>
-                      setEditingItem({ ...editingItem, quantity: parseInt(e.target.value) || 0 })
+                      setEditingItem({
+                        ...editingItem,
+                        quantity: e.target.value === '' ? ('' as any) : parseInt(e.target.value, 10) || 0,
+                      })
                     }
                     className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
                   />
@@ -1039,11 +1076,12 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                   <input
                     type="number"
                     min="0"
-                    value={editingItem.reorderLevel ?? 5}
+                    value={editingItem.reorderLevel === undefined ? '' : editingItem.reorderLevel}
+                    onFocus={(e) => e.target.select()}
                     onChange={(e) =>
                       setEditingItem({
                         ...editingItem,
-                        reorderLevel: parseInt(e.target.value) || 0,
+                        reorderLevel: e.target.value === '' ? ('' as any) : parseInt(e.target.value, 10) || 0,
                       })
                     }
                     className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"

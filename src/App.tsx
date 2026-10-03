@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SyncProvider } from './context/SyncContext';
 import { ThemeProvider } from './context/ThemeContext';
@@ -29,8 +29,24 @@ import { LoginScreen } from './screens/auth/LoginScreen';
 
 function MainApp() {
   const { currentUser, currentShop, isLoading, isLocked } = useAuth();
-  const [currentScreen, setCurrentScreen] = useState<ScreenId>('sell');
+  const [currentScreen, setCurrentScreen] = useState<ScreenId>(() => {
+    return currentUser?.role === 'owner' ? 'dashboard' : 'sell';
+  });
   const [dismissedClosingDate, setDismissedClosingDate] = useState<string | null>(null);
+
+  // When owner logs in, they land on Dashboard first, not Sell
+  const prevUserKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (currentUser) {
+      const userKey = `${currentUser.uid}_${currentUser.role}`;
+      if (userKey !== prevUserKeyRef.current) {
+        prevUserKeyRef.current = userKey;
+        setCurrentScreen(currentUser.role === 'owner' ? 'dashboard' : 'sell');
+      }
+    } else {
+      prevUserKeyRef.current = null;
+    }
+  }, [currentUser]);
 
   if (isLoading) {
     return (
@@ -108,7 +124,7 @@ function MainApp() {
       )}
 
       {/* Top Header */}
-      <Header />
+      <Header onNavigate={(screen) => setCurrentScreen(screen)} />
 
       {/* Main Content Area */}
       <main className="flex-1 w-full overflow-x-hidden">

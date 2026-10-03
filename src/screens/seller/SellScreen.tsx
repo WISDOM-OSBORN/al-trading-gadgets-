@@ -27,7 +27,7 @@ export const SellScreen: React.FC = () => {
 
   // Active Sale Form State
   const [selectedItem, setSelectedItem] = useState<Item | null>(null);
-  const [sellQuantity, setSellQuantity] = useState<number>(1);
+  const [sellQuantity, setSellQuantity] = useState<number | ''>(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -97,8 +97,12 @@ export const SellScreen: React.FC = () => {
   };
 
   // Adjust quantity
-  const handleQtyChange = (qty: number) => {
-    const validQty = Math.max(1, qty);
+  const handleQtyChange = (qty: number | '') => {
+    if (qty === '') {
+      setSellQuantity('');
+      return;
+    }
+    const validQty = Math.max(0, qty);
     setSellQuantity(validQty);
   };
 
@@ -106,14 +110,15 @@ export const SellScreen: React.FC = () => {
   const handleRecordSale = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedItem || !currentUser || !currentShop) return;
-    if (sellQuantity <= 0) {
+    const numQty = typeof sellQuantity === 'number' ? sellQuantity : parseInt(sellQuantity, 10) || 0;
+    if (numQty <= 0) {
       setErrorMessage('Quantity must be at least 1.');
       return;
     }
 
-    const calculatedTotal = Number((sellQuantity * selectedItem.sellingPrice).toFixed(2));
+    const calculatedTotal = Number((numQty * selectedItem.sellingPrice).toFixed(2));
 
-    if (!currentShop.settings.allowNegativeStock && selectedItem.quantity < sellQuantity) {
+    if (!currentShop.settings.allowNegativeStock && selectedItem.quantity < numQty) {
       setErrorMessage(
         `Insufficient stock for "${selectedItem.name}". Only ${selectedItem.quantity} left in stock.`
       );
@@ -136,7 +141,7 @@ export const SellScreen: React.FC = () => {
             itemId: selectedItem.id,
             name: selectedItem.name,
             sku: selectedItem.sku,
-            qty: sellQuantity,
+            qty: numQty,
             unitPrice: selectedItem.sellingPrice,
             costPriceAtSale: selectedItem.costPrice,
             discount: 0,
@@ -147,7 +152,7 @@ export const SellScreen: React.FC = () => {
         total: calculatedTotal,
       });
 
-      const remaining = selectedItem.quantity - sellQuantity;
+      const remaining = selectedItem.quantity - numQty;
 
       const timeString = new Date(saleRecord.createdAtClient).toLocaleTimeString('en-US', {
         hour: '2-digit',
@@ -160,7 +165,7 @@ export const SellScreen: React.FC = () => {
         invoiceNo: saleRecord.invoiceNo,
         time: timeString,
         itemName: selectedItem.name,
-        quantitySold: sellQuantity,
+        quantitySold: numQty,
         amount: calculatedTotal,
         remainingStock: remaining,
       });
@@ -340,7 +345,10 @@ export const SellScreen: React.FC = () => {
                                 <span className="text-[11px] text-slate-500">
                                   Leaves{' '}
                                   <strong className="text-slate-800 dark:text-slate-200">
-                                    {item.quantity - sellQuantity}
+                                    {item.quantity -
+                                      (typeof sellQuantity === 'number'
+                                        ? sellQuantity
+                                        : parseInt(sellQuantity, 10) || 0)}
                                   </strong>{' '}
                                   in stock
                                 </span>
@@ -351,28 +359,48 @@ export const SellScreen: React.FC = () => {
                                 <div className="flex items-center border border-slate-300 dark:border-slate-600 rounded-xl overflow-hidden bg-white dark:bg-slate-900 shadow-2xs">
                                   <button
                                     type="button"
-                                    onClick={() => handleQtyChange(sellQuantity - 1)}
+                                    onClick={() =>
+                                      handleQtyChange(
+                                        ((typeof sellQuantity === 'number'
+                                          ? sellQuantity
+                                          : parseInt(sellQuantity, 10) || 1) || 1) - 1
+                                      )
+                                    }
                                     className="w-9 h-9 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-95 cursor-pointer"
                                   >
                                     <Minus className="w-4 h-4" />
                                   </button>
                                   <input
                                     type="number"
-                                    min="1"
+                                    min="0"
                                     max={
                                       currentShop?.settings.allowNegativeStock
                                         ? undefined
                                         : item.quantity
                                     }
                                     value={sellQuantity}
-                                    onChange={(e) =>
-                                      handleQtyChange(parseInt(e.target.value) || 1)
-                                    }
+                                    onFocus={(e) => e.target.select()}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      if (val === '') {
+                                        handleQtyChange('');
+                                      } else {
+                                        const p = parseInt(val, 10);
+                                        handleQtyChange(isNaN(p) ? '' : p);
+                                      }
+                                    }}
+                                    placeholder="0"
                                     className="w-12 text-center font-black text-sm bg-transparent border-none text-slate-900 dark:text-white"
                                   />
                                   <button
                                     type="button"
-                                    onClick={() => handleQtyChange(sellQuantity + 1)}
+                                    onClick={() =>
+                                      handleQtyChange(
+                                        (typeof sellQuantity === 'number'
+                                          ? sellQuantity
+                                          : parseInt(sellQuantity, 10) || 0) + 1
+                                      )
+                                    }
                                     className="w-9 h-9 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-95 cursor-pointer"
                                   >
                                     <Plus className="w-4 h-4" />
@@ -433,7 +461,12 @@ export const SellScreen: React.FC = () => {
                                 <span>
                                   {isSubmitting
                                     ? 'Recording Sale...'
-                                    : `Record Sale • ${formatCurrency(sellQuantity * item.sellingPrice, currentShop?.currency)}`}
+                                    : `Record Sale • ${formatCurrency(
+                                        (typeof sellQuantity === 'number'
+                                          ? sellQuantity
+                                          : parseInt(sellQuantity, 10) || 0) * item.sellingPrice,
+                                        currentShop?.currency
+                                      )}`}
                                 </span>
                               </button>
                             </div>

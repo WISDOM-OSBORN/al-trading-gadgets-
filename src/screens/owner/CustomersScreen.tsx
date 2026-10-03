@@ -252,8 +252,13 @@ export const CustomersScreen: React.FC = () => {
                   min="0.01"
                   max={payingCustomer.balanceOwed || undefined}
                   required
-                  value={payAmount || ''}
-                  onChange={(e) => setPayAmount(parseFloat(e.target.value) || 0)}
+                  value={payAmount === 0 ? '' : payAmount}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setPayAmount(val === '' ? 0 : parseFloat(val) || 0);
+                  }}
+                  placeholder="0.00"
                   className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold text-sm"
                 />
               </div>
