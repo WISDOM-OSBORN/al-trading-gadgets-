@@ -325,8 +325,6 @@ export async function initializeDatabase() {
     // Sanitize accounts: Remove blocked account gha@gmail.com and old prototype accounts
     const blockedEmails = [
       'gha@gmail.com',
-      'wisdomosborn65@gmail.com',
-      'abuyahwisdomosborn@gmail.com',
       'owner@shopledger.app',
       'alex.rivera@shopledger.app',
     ];

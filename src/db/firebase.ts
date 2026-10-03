@@ -104,10 +104,6 @@ export async function seedFirestoreBusinessDefaults(): Promise<void> {
     const deprecatedIds = [
       'user-gha_gmail_com',
       'user-gha',
-      'user-wisdomosborn65_gmail_com',
-      'user-wisdomosborn65',
-      'user-abuyahwisdomosborn_gmail_com',
-      'user-abuyahwisdomosborn',
       'user-owner_shopledger_app',
     ];
     for (const dId of deprecatedIds) {

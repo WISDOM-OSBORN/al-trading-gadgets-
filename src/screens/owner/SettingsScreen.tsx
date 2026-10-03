@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { User, Sale } from '../../types';
-import { db, purgeDummyData, resetDatabaseWithSeed, deleteAllCashierStaffAccounts } from '../../db';
+import { db, purgeDummyData, resetDatabaseWithSeed } from '../../db';
 import { firestore, sanitizeForFirestore } from '../../db/firebase';
-import { doc, deleteDoc, setDoc } from 'firebase/firestore';
+import { doc, deleteDoc, setDoc, collection, getDocs } from 'firebase/firestore';
 import { formatDateTime } from '../../utils/formatters';
 import {
   calculateDailyClosing,
@@ -14,7 +14,6 @@ import {
 } from '../../utils/dailyClosingReport';
 import {
   Settings,
-  Store,
   Users,
   Database,
   RotateCcw,
@@ -27,7 +26,6 @@ import {
   Sun,
   Moon,
   Lock,
-  Unlock,
   Trash2,
   Clock,
   Send,
@@ -42,21 +40,8 @@ interface SettingsScreenProps {
 }
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }) => {
-  const { currentShop, currentUser, updateShopSettings, updateShopDetails } = useAuth();
+  const { currentShop, currentUser, updateShopSettings } = useAuth();
   const { theme, setTheme, isDark, toggleTheme } = useTheme();
-
-  // Shop Details form
-  const [shopName, setShopName] = useState(currentShop?.name || '');
-  const [shopPhone, setShopPhone] = useState(currentShop?.phone || '');
-  const [shopAddress, setShopAddress] = useState(currentShop?.address || '');
-  const [currency, setCurrency] = useState(currentShop?.currency || 'GHS');
-  const [taxRate, setTaxRate] = useState(currentShop?.settings.taxRatePercent || 0);
-
-  // Security Lock for Shop Profile (Name & Address)
-  const [isProfileLocked, setIsProfileLocked] = useState(true);
-  const [showUnlockModal, setShowUnlockModal] = useState(false);
-  const [unlockPinInput, setUnlockPinInput] = useState('');
-  const [unlockError, setUnlockError] = useState<string | null>(null);
 
   // Settings toggles
   const [allowPriceOverride, setAllowPriceOverride] = useState(
@@ -70,9 +55,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   );
   const [receiptFooter, setReceiptFooter] = useState(
     currentShop?.settings.receiptFooter || ''
-  );
-  const [editPin, setEditPin] = useState(
-    currentShop?.settings.editPin || '1234'
   );
 
   // Daily Closing Settings
@@ -96,6 +78,12 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   const [newSellerPin, setNewSellerPin] = useState('1234');
   const [isAddingSeller, setIsAddingSeller] = useState(false);
 
+  // Reset Staff Password / PIN Modal
+  const [sellerToResetPin, setSellerToResetPin] = useState<User | null>(null);
+  const [newStaffPin, setNewStaffPin] = useState('1234');
+  const [resetPinError, setResetPinError] = useState<string | null>(null);
+  const [isSavingPin, setIsSavingPin] = useState(false);
+
   // Delete Seller Modal
   const [sellerToDelete, setSellerToDelete] = useState<User | null>(null);
   const [deletePinInput, setDeletePinInput] = useState('');
@@ -107,43 +95,69 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   const [purgeError, setPurgeError] = useState<string | null>(null);
   const [isPurging, setIsPurging] = useState(false);
 
-  // Delete All Mistake Staff Accounts Modal
-  const [showDeleteAllModal, setShowDeleteAllModal] = useState(false);
-  const [isDeletingAll, setIsDeletingAll] = useState(false);
-
   // Status feedback
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
 
   const loadSellers = async () => {
     if (!currentShop) return;
-    const allUsers = await db.users.where('shopId').equals(currentShop.id).toArray();
-    const cleanUsers: User[] = [];
-    let seenRaji = false;
 
-    for (const u of allUsers) {
-      if (u.email?.toLowerCase() === 'rajifarrid@gmail.com') {
-        if (!seenRaji) {
-          seenRaji = true;
-          cleanUsers.push(u);
-        } else {
-          await db.users.delete(u.uid);
+    // 1. Fetch from Firestore users collection so any account created remotely/Google is loaded
+    try {
+      const usersSnap = await getDocs(collection(firestore, 'users'));
+      for (const d of usersSnap.docs) {
+        const data = d.data();
+        const emailLower = (data.email || '').toLowerCase().trim();
+        if (
+          emailLower &&
+          emailLower !== 'gha@gmail.com' &&
+          emailLower !== 'owner@shopledger.app' &&
+          emailLower !== 'alex.rivera@shopledger.app'
+        ) {
+          const userDoc: User = {
+            uid: d.id,
+            shopId: data.shopId || currentShop.id,
+            name: data.name || emailLower.split('@')[0],
+            email: data.email,
+            role: data.role || (emailLower === 'rajifarrid@gmail.com' ? 'owner' : 'seller'),
+            active: data.active !== false,
+            deviceCode: data.deviceCode || 'D02',
+            pin: data.pin || '1234',
+            createdAt: data.createdAt || Date.now(),
+          };
+          await db.users.put(userDoc);
         }
-      } else if (
-        u.email?.toLowerCase() === 'owner@shopledger.app' ||
-        u.email?.toLowerCase() === 'wisdomosborn65@gmail.com' ||
-        u.email?.toLowerCase() === 'abuyahwisdomosborn@gmail.com' ||
-        u.name?.toLowerCase().includes('alex rivera') ||
-        u.name?.toLowerCase().includes('wisdom osborn')
-      ) {
-        // Automatically delete deprecated accounts
-        await db.users.delete(u.uid);
-      } else {
-        cleanUsers.push(u);
       }
+    } catch (err) {
+      console.warn('Firestore users sync note (offline fallback active):', err);
     }
 
-    if (!seenRaji) {
+    // 2. Fetch all local users from IndexedDB
+    const allUsers = await db.users.toArray();
+    const cleanUsers: User[] = [];
+    const seenEmails = new Set<string>();
+
+    for (const u of allUsers) {
+      const emailLower = (u.email || '').toLowerCase().trim();
+      if (
+        !emailLower ||
+        emailLower === 'gha@gmail.com' ||
+        emailLower === 'owner@shopledger.app' ||
+        emailLower === 'alex.rivera@shopledger.app'
+      ) {
+        await db.users.delete(u.uid);
+        continue;
+      }
+
+      if (seenEmails.has(emailLower)) {
+        continue;
+      }
+      seenEmails.add(emailLower);
+      cleanUsers.push(u);
+    }
+
+    // Ensure Raji Farrid (owner) is present
+    if (!seenEmails.has('rajifarrid@gmail.com')) {
       const raji: User = {
         uid: 'user-rajifarrid',
         shopId: currentShop.id,
@@ -159,6 +173,13 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       cleanUsers.unshift(raji);
     }
 
+    // Sort: Store Owner at the top, then other staff accounts sorted alphabetically
+    cleanUsers.sort((a, b) => {
+      if (a.role === 'owner') return -1;
+      if (b.role === 'owner') return 1;
+      return a.name.localeCompare(b.name);
+    });
+
     setSellers(cleanUsers);
   };
 
@@ -168,16 +189,10 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
   useEffect(() => {
     if (currentShop) {
-      setShopName(currentShop.name);
-      setShopPhone(currentShop.phone);
-      setShopAddress(currentShop.address);
-      setCurrency(currentShop.currency);
-      setTaxRate(currentShop.settings.taxRatePercent);
       setAllowPriceOverride(currentShop.settings.allowPriceOverride);
       setAllowNegativeStock(currentShop.settings.allowNegativeStock);
       setInvoicePrefix(currentShop.settings.invoicePrefix);
       setReceiptFooter(currentShop.settings.receiptFooter);
-      setEditPin(currentShop.settings.editPin || '1234');
       setClosingTime(currentShop.settings.closingTime || '20:00');
       setClosingReportEmail(
         currentShop.settings.closingReportEmail || currentUser?.email || 'rajifarrid@gmail.com'
@@ -189,48 +204,24 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     }
   }, [currentShop, currentUser]);
 
-  const ownerSecurityPin = currentShop?.settings?.editPin || currentUser?.pin || '1234';
+  const ownerSecurityPin = currentUser?.pin || currentShop?.settings?.editPin || '1234';
 
-  // Unlock Shop Profile
-  const handleUnlockProfile = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (unlockPinInput.trim() === ownerSecurityPin || unlockPinInput.trim() === '1234') {
-      setIsProfileLocked(false);
-      setShowUnlockModal(false);
-      setUnlockPinInput('');
-      setUnlockError(null);
-    } else {
-      setUnlockError('Incorrect Security PIN. Please enter the valid Owner PIN.');
-    }
-  };
-
-  // Save Shop Settings
+  // Save Closing & Report Settings
   const handleSaveShopSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentShop) return;
-
-    await updateShopDetails({
-      name: shopName.trim(),
-      phone: shopPhone.trim(),
-      address: shopAddress.trim(),
-      currency,
-    });
 
     await updateShopSettings({
       allowPriceOverride,
       allowNegativeStock,
       invoicePrefix: invoicePrefix.toUpperCase(),
       receiptFooter,
-      taxRatePercent: Number(taxRate) || 0,
-      editPin: editPin.trim() || '1234',
       closingTime: closingTime.trim() || '20:00',
       closingReportEmail: closingReportEmail.trim(),
       closingReportWhatsapp: closingReportWhatsapp.trim(),
       autoDispatchReport,
     });
 
-    // Re-lock profile after save
-    setIsProfileLocked(true);
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 3000);
   };
@@ -310,6 +301,10 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       // 2. Delete from Firestore
       try {
         await deleteDoc(doc(firestore, 'users', sellerToDelete.uid));
+        const altUid = `user-${sellerToDelete.email.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        if (altUid !== sellerToDelete.uid) {
+          await deleteDoc(doc(firestore, 'users', altUid));
+        }
       } catch (fErr) {
         console.warn('Firestore user deletion notice:', fErr);
       }
@@ -338,19 +333,74 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     }
   };
 
-  // Delete All Cashier/Staff Accounts created by mistake
-  const handleDeleteAllStaff = async () => {
+  // Reset Staff PIN / Password
+  const handleSaveStaffPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sellerToResetPin || !currentShop) return;
+    const cleanPin = newStaffPin.trim();
+    if (!cleanPin) {
+      setResetPinError('Please enter a valid PIN or password.');
+      return;
+    }
+
     try {
-      setIsDeletingAll(true);
-      const count = await deleteAllCashierStaffAccounts();
-      setShowDeleteAllModal(false);
-      await loadSellers();
-      setDispatchNotice(`Successfully deleted ${count} cashier/staff accounts. Only the primary Store Owner remains.`);
+      setIsSavingPin(true);
+      // 1. Update in local IndexedDB
+      await db.users.update(sellerToResetPin.uid, {
+        pin: cleanPin,
+      });
+
+      // 2. Update in Firebase Firestore
+      try {
+        const userRef = doc(firestore, 'users', sellerToResetPin.uid);
+        await setDoc(
+          userRef,
+          sanitizeForFirestore({
+            ...sellerToResetPin,
+            pin: cleanPin,
+            updatedAt: Date.now(),
+          }),
+          { merge: true }
+        );
+
+        const altUid = `user-${sellerToResetPin.email.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        if (altUid !== sellerToResetPin.uid) {
+          await setDoc(
+            doc(firestore, 'users', altUid),
+            sanitizeForFirestore({
+              pin: cleanPin,
+              updatedAt: Date.now(),
+            }),
+            { merge: true }
+          );
+        }
+      } catch (fErr) {
+        console.warn('Firestore PIN sync notice:', fErr);
+      }
+
+      // 3. Audit log
+      await db.auditLogs.add({
+        id: `audit-${Date.now()}`,
+        shopId: currentShop.id,
+        action: 'seller_updated',
+        entity: 'users',
+        entityId: sellerToResetPin.uid,
+        userId: currentUser?.uid || 'owner',
+        userName: currentUser?.name || 'Owner',
+        meta: { name: sellerToResetPin.name, email: sellerToResetPin.email, action: 'pin_reset' },
+        createdAt: Date.now(),
+      });
+
+      setDispatchNotice(`Login PIN/password for "${sellerToResetPin.name}" reset to "${cleanPin}" successfully.`);
       setTimeout(() => setDispatchNotice(null), 4000);
+      setSellerToResetPin(null);
+      setNewStaffPin('1234');
+      setResetPinError(null);
+      await loadSellers();
     } catch (err: any) {
-      alert(`Failed to delete accounts: ${err?.message || err}`);
+      setResetPinError(`Failed to update PIN: ${err?.message || err}`);
     } finally {
-      setIsDeletingAll(false);
+      setIsSavingPin(false);
     }
   };
 
@@ -364,6 +414,10 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     try {
       const userRef = doc(firestore, 'users', user.uid);
       await setDoc(userRef, { active: newActiveState, updatedAt: Date.now() }, { merge: true });
+      const altUid = `user-${user.email.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      if (altUid !== user.uid) {
+        await setDoc(doc(firestore, 'users', altUid), { active: newActiveState, updatedAt: Date.now() }, { merge: true });
+      }
     } catch (fErr) {
       console.warn('Firestore active state sync notice:', fErr);
     }
@@ -383,10 +437,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       setIsPurging(true);
       await purgeDummyData();
 
-      // Clean dummy accounts from Firestore (preserving owner Raji Farrid)
+      // Clean dummy prototype account from Firestore
       try {
-        await deleteDoc(doc(firestore, 'users', 'user-wisdomosborn65'));
-        await deleteDoc(doc(firestore, 'users', 'user-abuyahwisdomosborn'));
         await deleteDoc(doc(firestore, 'users', 'user-owner_shopledger_app'));
       } catch {
         // non-blocking
@@ -499,7 +551,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       {saveSuccess && (
         <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-in fade-in">
           <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-          <span>Settings saved! Store Profile is now securely locked.</span>
+          <span>Daily Closing and Report settings saved successfully!</span>
         </div>
       )}
 
@@ -510,262 +562,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
         </div>
       )}
 
-      {/* Main Settings Form */}
-      <form onSubmit={handleSaveShopSettings} className="space-y-4">
-        {/* Section 1: Shop Profile (Locked by default with Owner PIN) */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3 relative">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
-            <div className="flex items-center gap-2">
-              <Store className="w-4 h-4 text-indigo-500" />
-              <h2 className="font-bold text-sm text-slate-900 dark:text-white">Store Profile</h2>
-              {isProfileLocked ? (
-                <span className="px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-400 text-[10px] font-bold flex items-center gap-1 border border-amber-200 dark:border-amber-800">
-                  <Lock className="w-3 h-3" />
-                  Locked (PIN Protected)
-                </span>
-              ) : (
-                <span className="px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold flex items-center gap-1 border border-emerald-200 dark:border-emerald-800">
-                  <Unlock className="w-3 h-3" />
-                  Unlocked for Editing
-                </span>
-              )}
-            </div>
-
-            {isProfileLocked ? (
-              <button
-                type="button"
-                onClick={() => setShowUnlockModal(true)}
-                className="px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold hover:bg-slate-800 dark:hover:bg-slate-100 flex items-center gap-1.5 cursor-pointer shadow-xs"
-              >
-                <KeyRound className="w-3 h-3" />
-                <span>Unlock with Owner PIN</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setIsProfileLocked(true)}
-                className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1 cursor-pointer"
-              >
-                <Lock className="w-3 h-3" />
-                <span>Lock Again</span>
-              </button>
-            )}
-          </div>
-
-          {isProfileLocked && (
-            <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
-              <Lock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              <span>
-                Shop name and address are locked to protect against unauthorized tampering. Click <b>Unlock with Owner PIN</b> to modify store branding.
-              </span>
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Shop Name
-              </label>
-              <input
-                type="text"
-                required
-                disabled={isProfileLocked}
-                value={shopName}
-                onChange={(e) => setShopName(e.target.value)}
-                className={`w-full px-3 py-2 border rounded-xl font-bold transition ${
-                  isProfileLocked
-                    ? 'bg-slate-100 dark:bg-slate-800/40 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
-                    : 'bg-white dark:bg-slate-800 border-indigo-500 text-slate-900 dark:text-white shadow-xs'
-                }`}
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Phone Number
-              </label>
-              <input
-                type="tel"
-                disabled={isProfileLocked}
-                value={shopPhone}
-                onChange={(e) => setShopPhone(e.target.value)}
-                className={`w-full px-3 py-2 border rounded-xl transition ${
-                  isProfileLocked
-                    ? 'bg-slate-100 dark:bg-slate-800/40 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
-                    : 'bg-white dark:bg-slate-800 border-indigo-500 text-slate-900 dark:text-white shadow-xs'
-                }`}
-              />
-            </div>
-
-            <div className="sm:col-span-2">
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Address / Physical Store Location
-              </label>
-              <input
-                type="text"
-                disabled={isProfileLocked}
-                value={shopAddress}
-                onChange={(e) => setShopAddress(e.target.value)}
-                className={`w-full px-3 py-2 border rounded-xl transition ${
-                  isProfileLocked
-                    ? 'bg-slate-100 dark:bg-slate-800/40 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed'
-                    : 'bg-white dark:bg-slate-800 border-indigo-500 text-slate-900 dark:text-white shadow-xs'
-                }`}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-2 sm:col-span-2">
-              <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Currency
-                </label>
-                <select
-                  value={currency}
-                  onChange={(e) => setCurrency(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold"
-                >
-                  <option value="GHS">Ghanaian Cedi (GH₵)</option>
-                  <option value="USD">USD ($)</option>
-                  <option value="EUR">EUR (€)</option>
-                  <option value="GBP">GBP (£)</option>
-                  <option value="NGN">NGN (₦)</option>
-                  <option value="KES">KES (KSh)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Security Edit PIN (Master Key)
-                </label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  value={editPin}
-                  onChange={(e) => setEditPin(e.target.value)}
-                  placeholder="e.g. 1234"
-                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-mono text-center font-bold text-indigo-600 dark:text-indigo-400"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Section 2: Daily Sales Closing Report & Scheduled Dispatch */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-emerald-600" />
-              <h2 className="font-bold text-sm text-slate-900 dark:text-white">
-                Daily Sales Closing & Automated Reports
-              </h2>
-            </div>
-            <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
-              End-of-Day Audit
-            </span>
-          </div>
-
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            At the close of business (e.g. <b>8:00 PM GMT</b>), compile all sales, invoices, payment breakdowns, and gross profit. Send automatically to the owner via WhatsApp or Email PDF.
-          </p>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Shop Closing Time (GMT)
-              </label>
-              <input
-                type="time"
-                value={closingTime}
-                onChange={(e) => setClosingTime(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Owner Report Email (PDF)
-              </label>
-              <input
-                type="email"
-                value={closingReportEmail}
-                onChange={(e) => setClosingReportEmail(e.target.value)}
-                placeholder="owner@gmail.com"
-                className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Owner WhatsApp Number
-              </label>
-              <input
-                type="tel"
-                value={closingReportWhatsapp}
-                onChange={(e) => setClosingReportWhatsapp(e.target.value)}
-                placeholder="+233241234567"
-                className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
-              />
-            </div>
-          </div>
-
-          <div className="pt-2 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 dark:border-slate-800">
-            <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-700 dark:text-slate-300">
-              <input
-                type="checkbox"
-                checked={autoDispatchReport}
-                onChange={(e) => setAutoDispatchReport(e.target.checked)}
-                className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500"
-              />
-              <span>Auto-dispatch daily closing notification at {closingTime} GMT</span>
-            </label>
-
-            {/* Instant Dispatch Actions */}
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={handleSendToWhatsApp}
-                className="px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 flex items-center gap-1.5 cursor-pointer shadow-xs"
-                title="Send today's summary directly to WhatsApp"
-              >
-                <Share2 className="w-3.5 h-3.5" />
-                <span>Send to WhatsApp</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handlePrintDailyPDF}
-                className="px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold hover:bg-slate-800 dark:hover:bg-slate-100 flex items-center gap-1.5 cursor-pointer shadow-xs"
-                title="Print or Save official Daily Closing PDF"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                <span>Print / Save PDF</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleSendEmailReport}
-                className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1.5 cursor-pointer"
-                title="Email daily summary"
-              >
-                <Mail className="w-3.5 h-3.5" />
-                <span>Email Summary</span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Save Settings Bar */}
-        <div className="flex justify-end pt-1">
-          <button
-            type="submit"
-            className="px-6 py-2.5 rounded-xl bg-emerald-600 text-white font-bold text-xs hover:bg-emerald-700 shadow-sm cursor-pointer transition"
-          >
-            Save All Settings & Lock Store Profile
-          </button>
-        </div>
-      </form>
-
-      {/* Section 4: Cashiers & Staff Accounts with Delete Key Protection */}
+      {/* Section 1: Cashiers & Staff Accounts with Master Key Management */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800 gap-2">
           <div className="flex items-center gap-2">
@@ -775,17 +572,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
             </h2>
           </div>
           <div className="flex items-center gap-2">
-            {sellers.filter((s) => s.role !== 'owner').length > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowDeleteAllModal(true)}
-                className="px-3 py-1.5 rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 flex items-center gap-1 cursor-pointer transition shadow-xs"
-                title="Delete all accounts created by mistake"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>Delete All Mistake Accounts ({sellers.filter((s) => s.role !== 'owner').length})</span>
-              </button>
-            )}
             <button
               type="button"
               onClick={() => setIsAddingSeller(true)}
@@ -802,7 +588,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
           {sellers.map((user) => (
             <div key={user.uid} className="py-2.5 flex items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-bold text-slate-900 dark:text-white">
                     {user.name}
                   </span>
@@ -818,6 +604,11 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
                   >
                     {user.role === 'owner' ? 'Owner' : 'Staff'}
                   </span>
+                  {!user.active && user.role !== 'owner' && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300">
+                      Disabled
+                    </span>
+                  )}
                 </div>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {user.email} &bull; Login PIN:{' '}
@@ -827,15 +618,31 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                {/* Reset Password / PIN Button for Admin */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSellerToResetPin(user);
+                    setNewStaffPin(user.pin || '1234');
+                    setResetPinError(null);
+                  }}
+                  className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center gap-1 cursor-pointer transition shadow-xs"
+                  title="Reset Login Password / PIN"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-blue-500" />
+                  <span>Reset PIN</span>
+                </button>
+
                 {user.role !== 'owner' ? (
                   <>
                     <button
+                      type="button"
                       onClick={() => handleToggleSellerActive(user)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold cursor-pointer ${
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold cursor-pointer transition ${
                         user.active
-                          ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
-                          : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                          ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-100'
+                          : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 hover:bg-slate-200'
                       }`}
                     >
                       {user.active ? 'Active' : 'Disabled'}
@@ -843,6 +650,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
                     {/* Delete Staff Member Key */}
                     <button
+                      type="button"
                       onClick={() => {
                         setSellerToDelete(user);
                         setDeletePinInput('');
@@ -901,13 +709,13 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
               <button
                 type="button"
                 onClick={() => setIsAddingSeller(false)}
-                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 font-semibold"
+                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 font-semibold cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-bold hover:bg-indigo-700 shadow-xs"
+                className="px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-bold hover:bg-indigo-700 shadow-xs cursor-pointer"
               >
                 Create Staff Account
               </button>
@@ -915,6 +723,117 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
           </form>
         )}
       </div>
+
+      {/* Section 2: Daily Sales Closing Report & Scheduled Dispatch */}
+      <form onSubmit={handleSaveShopSettings} className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+        <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-emerald-600" />
+            <h2 className="font-bold text-sm text-slate-900 dark:text-white">
+              Daily Sales Closing & Automated Reports
+            </h2>
+          </div>
+          <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
+            End-of-Day Audit
+          </span>
+        </div>
+
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          At the close of business (e.g. <b>{closingTime} GMT</b>), compile all sales, invoices, payment breakdowns, and gross profit. Send automatically to the owner via WhatsApp or Email PDF.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <div>
+            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+              Shop Closing Time (GMT)
+            </label>
+            <input
+              type="time"
+              value={closingTime}
+              onChange={(e) => setClosingTime(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-bold font-mono"
+            />
+          </div>
+
+          <div>
+            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+              Owner Report Email (PDF)
+            </label>
+            <input
+              type="email"
+              value={closingReportEmail}
+              onChange={(e) => setClosingReportEmail(e.target.value)}
+              placeholder="owner@gmail.com"
+              className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+            />
+          </div>
+
+          <div>
+            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+              Owner WhatsApp Number
+            </label>
+            <input
+              type="tel"
+              value={closingReportWhatsapp}
+              onChange={(e) => setClosingReportWhatsapp(e.target.value)}
+              placeholder="+233241234567"
+              className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+            />
+          </div>
+        </div>
+
+        <div className="pt-2 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 dark:border-slate-800">
+          <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-700 dark:text-slate-300">
+            <input
+              type="checkbox"
+              checked={autoDispatchReport}
+              onChange={(e) => setAutoDispatchReport(e.target.checked)}
+              className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500"
+            />
+            <span>Auto-dispatch daily closing notification at {closingTime} GMT</span>
+          </label>
+
+          {/* Instant Dispatch Actions & Save */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSendToWhatsApp}
+              className="px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 flex items-center gap-1.5 cursor-pointer shadow-xs"
+              title="Send today's summary directly to WhatsApp"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              <span>Send to WhatsApp</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrintDailyPDF}
+              className="px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold hover:bg-slate-800 dark:hover:bg-slate-100 flex items-center gap-1.5 cursor-pointer shadow-xs"
+              title="Print or Save official Daily Closing PDF"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Print / Save PDF</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSendEmailReport}
+              className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1.5 cursor-pointer"
+              title="Email daily summary"
+            >
+              <Mail className="w-3.5 h-3.5" />
+              <span>Email Summary</span>
+            </button>
+
+            <button
+              type="submit"
+              className="px-4 py-1.5 rounded-xl bg-indigo-600 text-white font-bold text-xs hover:bg-indigo-700 shadow-sm cursor-pointer transition"
+            >
+              Save Report Settings
+            </button>
+          </div>
+        </div>
+      </form>
 
       {/* Section 5: Data Management & Clean Production Setup */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
@@ -953,61 +872,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
         </div>
       </div>
 
-      {/* Modal 1: Unlock Shop Profile PIN Dialog */}
-      {showUnlockModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
-          <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-sm w-full p-5 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4 animate-in fade-in">
-            <div className="text-center space-y-1">
-              <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 mx-auto flex items-center justify-center">
-                <Lock className="w-5 h-5" />
-              </div>
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white">
-                Unlock Store Profile
-              </h3>
-              <p className="text-xs text-slate-500">
-                Enter your Owner PIN to unlock editing for shop name and physical address.
-              </p>
-            </div>
-
-            <form onSubmit={handleUnlockProfile} className="space-y-3">
-              <div>
-                <input
-                  type="password"
-                  maxLength={6}
-                  autoFocus
-                  required
-                  value={unlockPinInput}
-                  onChange={(e) => setUnlockPinInput(e.target.value)}
-                  placeholder="Enter Owner PIN (default: 1234)"
-                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-center font-mono text-base font-bold tracking-widest"
-                />
-              </div>
-
-              {unlockError && (
-                <p className="text-xs text-rose-500 text-center font-semibold">{unlockError}</p>
-              )}
-
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowUnlockModal(false)}
-                  className="flex-1 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold shadow-sm"
-                >
-                  Unlock
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal 2: Delete Seller Account Dialog with Delete Key */}
+      {/* Modal: Delete Seller Account Dialog with Delete Key */}
       {sellerToDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
           <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-sm w-full p-5 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4 animate-in fade-in">
@@ -1125,43 +990,84 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
         </div>
       )}
 
-      {/* Modal 4: Delete All Mistake Staff Accounts Dialog */}
-      {showDeleteAllModal && (
+      {/* Modal: Reset Staff Password / PIN */}
+      {sellerToResetPin && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
           <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-sm w-full p-5 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4 animate-in fade-in">
-            <div className="text-center space-y-1.5">
-              <div className="w-12 h-12 rounded-full bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 mx-auto flex items-center justify-center">
-                <Trash2 className="w-6 h-6" />
+            <div className="text-center space-y-1">
+              <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 mx-auto flex items-center justify-center">
+                <KeyRound className="w-5 h-5" />
               </div>
-              <h3 className="font-bold text-base text-slate-900 dark:text-white">
-                Delete All Mistake Accounts
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white">
+                Reset Login PIN / Password
               </h3>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                This will delete all {sellers.filter((s) => s.role !== 'owner').length} cashier/staff accounts created by mistake from both this device and Cloud Firestore.
-              </p>
-              <p className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 p-2 rounded-xl border border-emerald-200 dark:border-emerald-800/60">
-                The primary Store Owner account will remain untouched.
+              <p className="text-xs text-slate-500">
+                Set a new login PIN or password for <b>{sellerToResetPin.name}</b> ({sellerToResetPin.email})
               </p>
             </div>
 
-            <div className="flex gap-2 pt-2">
-              <button
-                type="button"
-                disabled={isDeletingAll}
-                onClick={() => setShowDeleteAllModal(false)}
-                className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isDeletingAll}
-                onClick={handleDeleteAllStaff}
-                className="flex-1 py-2.5 rounded-xl bg-rose-600 text-white text-xs font-bold shadow-sm hover:bg-rose-700 transition disabled:opacity-50"
-              >
-                {isDeletingAll ? 'Deleting...' : 'Yes, Delete All'}
-              </button>
-            </div>
+            <form onSubmit={handleSaveStaffPin} className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wider mb-1">
+                  New Login PIN / Password
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={newStaffPin}
+                  onChange={(e) => setNewStaffPin(e.target.value)}
+                  placeholder="e.g. 1234 or custom"
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-center font-mono text-lg font-bold tracking-widest text-slate-900 dark:text-white"
+                />
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div className="flex items-center justify-center gap-1.5 text-[11px]">
+                <span className="text-slate-400 text-[10px]">Presets:</span>
+                {['1234', '0000', '9999'].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setNewStaffPin(preset)}
+                    className="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 font-mono text-slate-700 dark:text-slate-300 font-semibold cursor-pointer"
+                  >
+                    {preset}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setNewStaffPin(Math.floor(1000 + Math.random() * 9000).toString())}
+                  className="px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 hover:bg-blue-100 font-semibold cursor-pointer text-[10px]"
+                >
+                  Random
+                </button>
+              </div>
+
+              {resetPinError && (
+                <p className="text-xs text-rose-500 text-center font-semibold">{resetPinError}</p>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSellerToResetPin(null);
+                    setResetPinError(null);
+                  }}
+                  className="flex-1 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingPin}
+                  className="flex-1 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold shadow-sm hover:bg-blue-700 cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingPin ? 'Saving...' : 'Update PIN'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
