@@ -4,7 +4,6 @@ import { db } from '../db';
 
 export const CSV_TEMPLATE_HEADERS = [
   'name',
-  'category',
   'cost_price',
   'selling_price',
   'quantity',
@@ -453,17 +452,23 @@ export async function exportInventoryToCSV(shopId: string): Promise<string> {
 // Generate CSV template with simple sample items in Ghanaian Cedis (GH₵)
 export function generateSampleTemplateCSV(): string {
   return Papa.unparse({
-    fields: ['name', 'category', 'cost_price', 'selling_price', 'quantity'],
+    fields: ['name', 'cost_price', 'selling_price', 'quantity'],
     data: [
-      ['3.5mm Male-to-Male Audio Aux Cable (1.2m)', 'Audio & Cables', '15.00', '30.00', '50'],
-      ['Anker 20W USB-C Nano PowerPort Adapter', 'Chargers & Adapters', '85.00', '140.00', '45'],
-      ['Braided Type-C to Type-C 60W Cable (1m)', 'Cables & Leads', '25.00', '45.00', '80'],
-      ['Oraimo 10,000mAh Toast 10 Power Bank', 'Power Banks', '180.00', '260.00', '34'],
-      ['Schneider 4-Gang Surge Protected Socket (2m)', 'Extension Sockets', '95.00', '150.00', '22'],
-      ['Philips 9W Warm White LED Bulb E27 Screw', 'Lighting & Bulbs', '20.00', '35.00', '60'],
-      ['Oraimo FreePods 4 ANC TWS Earbuds', 'Audio & Earphones', '220.00', '320.00', '26'],
-      ['Duracell Ultra Alkaline AA Batteries (Pack of 4)', 'Batteries & Cells', '30.00', '50.00', '90'],
-      ['British General 13A Double Switched Wall Socket', 'Switches & Sockets', '40.00', '70.00', '40'],
+      ['3.5mm Male-to-Male Audio Aux Cable (1.2m)', '15.00', '30.00', '50'],
+      ['Anker 20W USB-C Nano PowerPort Adapter', '85.00', '140.00', '45'],
+      ['Braided Type-C to Type-C 60W Fast Charging Cable (1m)', '25.00', '45.00', '80'],
+      ['Oraimo 10,000mAh Toast 10 Power Bank Dual USB', '180.00', '260.00', '34'],
+      ['Schneider 4-Gang Surge Protected Socket Extender (2m)', '95.00', '150.00', '22'],
+      ['Philips 9W Warm White LED Bulb E27 Screw Base', '20.00', '35.00', '60'],
+      ['Oraimo FreePods 4 Active Noise Cancelling TWS Earbuds', '220.00', '320.00', '26'],
+      ['Duracell Ultra Alkaline AA Batteries (Pack of 4)', '30.00', '50.00', '90'],
+      ['British General 13A Double Switched Wall Socket', '40.00', '70.00', '40'],
+      ['Digital Multimeter AC/DC Voltage & Resistance Tester', '85.00', '145.00', '18'],
+      ['Heavy-Duty PVC Insulating Electric Tape (Black 10m)', '6.00', '12.00', '120'],
+      ['Baseus 65W GaN5 Pro Fast Charger 3-Port', '210.00', '310.00', '25'],
+      ['Apple 20W USB-C Power Adapter (Original UK Pin)', '190.00', '280.00', '30'],
+      ['Oraimo Lightning to USB Fast Charge Cable (1m)', '20.00', '40.00', '75'],
+      ['Schneider 16A Single Pole Miniature Circuit Breaker (MCB)', '28.00', '50.00', '50'],
     ],
   });
 }

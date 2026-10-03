@@ -4,6 +4,7 @@ import { db, initializeDatabase } from '../db';
 import {
   signInWithGooglePopup,
   authenticateRegisteredUser,
+  authenticateWorkerWithEmailAndPin,
   signOutFirebase,
 } from '../db/firebase';
 
@@ -15,6 +16,7 @@ interface AuthContextType {
   login: (email: string, role?: UserRole) => Promise<{ success: boolean; error?: string }>;
   loginWithGoogle: () => Promise<{ success: boolean; error?: string }>;
   loginWithGmail: (email: string) => Promise<{ success: boolean; error?: string }>;
+  loginWithEmailAndPin: (email: string, pin: string) => Promise<{ success: boolean; error?: string }>;
   unlockWithPin: (pin: string) => Promise<boolean>;
   lockScreen: () => void;
   logout: () => void;
@@ -54,16 +56,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         }
 
-        // If no active session, default to verified primary owner
-        if (!user) {
-          const owner = await db.users.where('email').equalsIgnoreCase('rajifarrid@gmail.com').first();
-          if (owner && owner.active) {
-            user = owner;
-            localStorage.setItem('shopledger_active_uid', owner.uid);
-          }
-        }
-
-        if (user && user.active) {
+        // Only authenticate if a valid active session is saved. NEVER auto-login as owner on refresh!
+        if (user && user.active === true) {
           setCurrentUser(user);
         } else {
           setCurrentUser(null);
@@ -147,6 +141,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return await loginWithGmail(email);
   };
 
+  const loginWithEmailAndPin = async (
+    email: string,
+    pin: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const authRes = await authenticateWorkerWithEmailAndPin(email, pin);
+      if (!authRes.success || !authRes.user) {
+        return { success: false, error: authRes.error || 'Authentication denied.' };
+      }
+
+      await db.users.put(authRes.user);
+      setCurrentUser(authRes.user);
+      localStorage.setItem('shopledger_active_uid', authRes.user.uid);
+      setIsLocked(false);
+      return { success: true };
+    } catch (err: any) {
+      console.error('Failed to authenticate with Email and PIN:', err);
+      return { success: false, error: err?.message || 'Login error.' };
+    }
+  };
+
   const unlockWithPin = async (pin: string): Promise<boolean> => {
     // Cannot unlock if user does not exist or has been deactivated
     if (!currentUser || currentUser.active !== true) return false;
@@ -223,6 +238,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         login,
         loginWithGoogle,
         loginWithGmail,
+        loginWithEmailAndPin,
         unlockWithPin,
         lockScreen,
         logout,

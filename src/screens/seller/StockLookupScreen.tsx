@@ -28,8 +28,7 @@ export const StockLookupScreen: React.FC = () => {
         item.name.toLowerCase().includes(q) ||
         item.sku.toLowerCase().includes(q) ||
         (item.barcode && item.barcode.toLowerCase().includes(q)) ||
-        item.brand.toLowerCase().includes(q) ||
-        item.category.toLowerCase().includes(q);
+        item.brand.toLowerCase().includes(q);
 
       if (!matchesSearch) return false;
 
@@ -120,7 +119,7 @@ export const StockLookupScreen: React.FC = () => {
                       {item.name}
                     </p>
                     <p className="text-[11px] text-slate-500 truncate mt-0.5">
-                      SKU: <span className="font-mono text-slate-700 dark:text-slate-300">{item.sku}</span> &bull; {item.category}
+                      SKU: <span className="font-mono text-slate-700 dark:text-slate-300">{item.sku}</span>{item.brand ? ` \u2022 ${item.brand}` : ''}
                     </p>
                     <p className="text-[10px] text-slate-400 mt-0.5">
                       Retail: {formatCurrency(item.sellingPrice, currentShop?.currency)} &bull; Reorder trigger: {item.reorderLevel} units

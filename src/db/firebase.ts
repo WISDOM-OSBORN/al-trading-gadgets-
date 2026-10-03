@@ -72,6 +72,8 @@ export async function seedFirestoreBusinessDefaults(): Promise<void> {
 
     // Clean up deprecated accounts in Firestore
     const deprecatedIds = [
+      'user-gha_gmail_com',
+      'user-gha',
       'user-wisdomosborn65_gmail_com',
       'user-wisdomosborn65',
       'user-abuyahwisdomosborn_gmail_com',
@@ -84,6 +86,17 @@ export async function seedFirestoreBusinessDefaults(): Promise<void> {
       } catch {
         // non-blocking
       }
+    }
+
+    // Explicitly delete any Firestore document with email gha@gmail.com
+    try {
+      const ghaQuery = query(collection(firestore, 'users'), where('email', '==', 'gha@gmail.com'));
+      const ghaSnap = await getDocs(ghaQuery);
+      for (const d of ghaSnap.docs) {
+        await deleteDoc(d.ref);
+      }
+    } catch {
+      // non-blocking
     }
 
     // 2. Pre-create designated owner record in Firestore
@@ -136,6 +149,14 @@ export async function authenticateRegisteredUser(
   const normalizedEmail = email.trim().toLowerCase();
   if (!normalizedEmail) {
     return { success: false, error: 'Email address cannot be empty.' };
+  }
+
+  // Explicitly block removed accounts
+  if (normalizedEmail === 'gha@gmail.com') {
+    return {
+      success: false,
+      error: 'Access Denied: The account "gha@gmail.com" has been permanently removed from this system.',
+    };
   }
 
   // 1. Check if designated owner (rajifarrid@gmail.com)
@@ -274,4 +295,114 @@ export async function signOutFirebase(): Promise<void> {
   } catch (err) {
     console.warn('Sign out notice:', err);
   }
+}
+
+/**
+ * Mobile-friendly and desktop direct worker/staff login via registered Email and assigned PIN.
+ * Eliminates popup dependencies on mobile phones.
+ */
+export async function authenticateWorkerWithEmailAndPin(
+  email: string,
+  pin: string
+): Promise<AuthResult> {
+  const normalizedEmail = email.trim().toLowerCase();
+  const trimmedPin = pin.trim();
+
+  if (!normalizedEmail) {
+    return { success: false, error: 'Please enter your registered email address.' };
+  }
+  if (!trimmedPin) {
+    return { success: false, error: 'Please enter your 4-digit security PIN.' };
+  }
+
+  if (normalizedEmail === 'gha@gmail.com') {
+    return {
+      success: false,
+      error: 'Access Denied: The account "gha@gmail.com" has been blocked and removed.',
+    };
+  }
+
+  // Check if owner logging in via PIN
+  if (normalizedEmail === 'rajifarrid@gmail.com') {
+    if (trimmedPin === '1234') {
+      const ownerUser: User = {
+        uid: 'user-rajifarrid',
+        shopId: 'shop-electrical-01',
+        name: 'Raji Farrid',
+        email: 'rajifarrid@gmail.com',
+        role: 'owner',
+        active: true,
+        deviceCode: 'D01',
+        pin: '1234',
+        createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      };
+      return { success: true, user: ownerUser };
+    } else {
+      return { success: false, error: 'Incorrect Owner PIN code.' };
+    }
+  }
+
+  // 1. Look up user in Firestore
+  let foundUser: User | null = null;
+  try {
+    const q = query(collection(firestore, 'users'), where('email', '==', normalizedEmail));
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      const docData = snap.docs[0].data();
+      foundUser = {
+        uid: snap.docs[0].id,
+        shopId: docData.shopId || 'shop-electrical-01',
+        name: docData.name || normalizedEmail.split('@')[0],
+        email: docData.email || normalizedEmail,
+        role: docData.role || 'seller',
+        active: docData.active === true,
+        deviceCode: docData.deviceCode || 'D02',
+        pin: docData.pin || '1234',
+        createdAt: docData.createdAt || Date.now(),
+      };
+    }
+  } catch (err) {
+    console.warn('Firestore worker lookup error:', err);
+  }
+
+  // 2. Check local Dexie
+  if (!foundUser) {
+    try {
+      const local = await db.users.where('email').equalsIgnoreCase(normalizedEmail).first();
+      if (local) foundUser = local;
+    } catch {
+      // offline fallback
+    }
+  }
+
+  if (!foundUser) {
+    return {
+      success: false,
+      error: `Access Denied: "${normalizedEmail}" is not registered. Please ask the shop owner to register your email in Cashiers & Staff Accounts.`,
+    };
+  }
+
+  if (foundUser.active !== true) {
+    return {
+      success: false,
+      error: `Account Deactivated: The account for "${foundUser.name}" has been disabled by the store owner.`,
+    };
+  }
+
+  // Verify PIN
+  const registeredPin = foundUser.pin || '1234';
+  if (registeredPin !== trimmedPin) {
+    return {
+      success: false,
+      error: 'Incorrect PIN: Please check your 4-digit PIN or ask the store owner.',
+    };
+  }
+
+  // Save/cache to local Dexie
+  await db.users.put(foundUser);
+
+  return {
+    success: true,
+    user: foundUser,
+  };
 }

@@ -23,7 +23,6 @@ export const SellScreen: React.FC = () => {
   // Search & Catalog
   const [searchQuery, setSearchQuery] = useState('');
   const [items, setItems] = useState<Item[]>([]);
-  const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Active Sale Form State
@@ -71,22 +70,11 @@ export const SellScreen: React.FC = () => {
     searchInputRef.current?.focus();
   }, []);
 
-  // Categories list
-  const categories = useMemo(() => {
-    const set = new Set<string>();
-    items.forEach((i) => {
-      if (i.category) set.add(i.category);
-    });
-    return ['All', ...Array.from(set).sort()];
-  }, [items]);
-
-  // Filtered items based on search query and category
+  // Filtered items based on search query
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    if (!q) return items;
     return items.filter((item) => {
-      const matchesCategory = selectedCategory === 'All' || item.category === selectedCategory;
-      if (!matchesCategory) return false;
-      if (!q) return true;
       return (
         item.name.toLowerCase().includes(q) ||
         item.sku.toLowerCase().includes(q) ||
@@ -94,7 +82,7 @@ export const SellScreen: React.FC = () => {
         item.brand.toLowerCase().includes(q)
       );
     });
-  }, [items, searchQuery, selectedCategory]);
+  }, [items, searchQuery]);
 
   // Handle selecting an item to sell - pops out the number of items box immediately!
   const handleSelectItem = (item: Item) => {
@@ -249,23 +237,6 @@ export const SellScreen: React.FC = () => {
               Clear
             </button>
           )}
-        </div>
-
-        {/* Category Pills */}
-        <div className="flex gap-1.5 overflow-x-auto pt-2 scrollbar-none">
-          {categories.map((cat) => (
-            <button
-              key={cat}
-              onClick={() => setSelectedCategory(cat)}
-              className={`px-3 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-                selectedCategory === cat
-                  ? 'bg-emerald-600 text-white shadow-xs'
-                  : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-              }`}
-            >
-              {cat}
-            </button>
-          ))}
         </div>
       </div>
 

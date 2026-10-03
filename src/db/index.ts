@@ -11,8 +11,11 @@ import {
   AuditLog,
   SyncQueueItem,
   DailyClosingReport,
+  OwnerWithdrawal,
 } from '../types';
 import { INITIAL_GADGETS, SEED_SHOP_ID } from './seedData';
+import { firestore } from './firebase';
+import { collection, getDocs, doc, deleteDoc } from 'firebase/firestore';
 
 export class ShopLedgerDatabase extends Dexie {
   shops!: Table<Shop, string>;
@@ -26,6 +29,7 @@ export class ShopLedgerDatabase extends Dexie {
   auditLogs!: Table<AuditLog, string>;
   syncQueue!: Table<SyncQueueItem, string>;
   dailyReports!: Table<DailyClosingReport, string>;
+  withdrawals!: Table<OwnerWithdrawal, string>;
 
   constructor() {
     super('ShopLedgerDB');
@@ -41,6 +45,7 @@ export class ShopLedgerDatabase extends Dexie {
       auditLogs: 'id, shopId, action, entity, userId, createdAt',
       syncQueue: 'id, entity, action, status, createdAt',
       dailyReports: 'id, shopId, sellerId, dateStr, isClosed',
+      withdrawals: 'id, shopId, itemId, createdAt',
     });
   }
 }
@@ -317,23 +322,38 @@ export async function initializeDatabase() {
       });
     }
 
-    // Strictly sanitize & enforce ONLY rajifarrid@gmail.com (removes Alex Rivera, Wisdom Osborn, & duplicates)
+    // Sanitize accounts: Remove blocked account gha@gmail.com and old prototype accounts
+    const blockedEmails = [
+      'gha@gmail.com',
+      'wisdomosborn65@gmail.com',
+      'abuyahwisdomosborn@gmail.com',
+      'owner@shopledger.app',
+      'alex.rivera@shopledger.app',
+    ];
+
     const allUsers = await db.users.toArray();
     let keptRaji = false;
+
     for (const u of allUsers) {
-      if (u.email?.toLowerCase() === 'rajifarrid@gmail.com' && !keptRaji) {
-        keptRaji = true;
-        await db.users.update(u.uid, {
-          name: 'Raji Farrid',
-          email: 'rajifarrid@gmail.com',
-          role: 'owner',
-          active: true,
-          deviceCode: 'D01',
-          pin: '1234',
-        });
-      } else {
+      const emailLower = (u.email || '').toLowerCase().trim();
+      if (blockedEmails.includes(emailLower)) {
         await db.users.delete(u.uid);
+      } else if (emailLower === 'rajifarrid@gmail.com') {
+        if (!keptRaji) {
+          keptRaji = true;
+          await db.users.update(u.uid, {
+            name: 'Raji Farrid',
+            email: 'rajifarrid@gmail.com',
+            role: 'owner',
+            active: true,
+            deviceCode: 'D01',
+            pin: '1234',
+          });
+        } else {
+          await db.users.delete(u.uid);
+        }
       }
+      // Real workers created by admin (role === 'seller') are strictly PRESERVED!
     }
 
     if (!keptRaji) {
@@ -350,7 +370,168 @@ export async function initializeDatabase() {
         createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
       });
     }
+
+    // Auto-purge the mistake cashier/staff accounts from Firestore and Dexie
+    if (!localStorage.getItem('shopledger_purged_mistake_accounts_v3')) {
+      const allUsersNow = await db.users.toArray();
+      for (const u of allUsersNow) {
+        if (u.email?.toLowerCase() !== 'rajifarrid@gmail.com' && u.role !== 'owner') {
+          await db.users.delete(u.uid);
+        }
+      }
+      try {
+        const snap = await getDocs(collection(firestore, 'users'));
+        for (const docSnap of snap.docs) {
+          const data = docSnap.data();
+          const email = (data.email || '').toLowerCase().trim();
+          if (email !== 'rajifarrid@gmail.com' && data.role !== 'owner') {
+            await deleteDoc(doc(firestore, 'users', docSnap.id));
+          }
+        }
+      } catch (err) {
+        console.warn('Error purging mistake accounts from Firestore:', err);
+      }
+      localStorage.setItem('shopledger_purged_mistake_accounts_v3', 'true');
+    }
+
+    // Pull registered workers from Firestore so they persist across devices/refreshes
+    try {
+      const snap = await getDocs(collection(firestore, 'users'));
+      for (const docSnap of snap.docs) {
+        const uData = docSnap.data() as User;
+        if (
+          uData &&
+          uData.email &&
+          !blockedEmails.includes(uData.email.toLowerCase().trim())
+        ) {
+          await db.users.put({
+            ...uData,
+            uid: docSnap.id,
+          });
+        } else if (uData && uData.email && blockedEmails.includes(uData.email.toLowerCase().trim())) {
+          await db.users.delete(docSnap.id);
+        }
+      }
+    } catch {
+      // offline fallback
+    }
   }
+}
+
+// Purge all cashier and staff accounts created by mistake (keeps ONLY store owner)
+export async function deleteAllCashierStaffAccounts(): Promise<number> {
+  let count = 0;
+  // 1. Delete all non-owner staff from local Dexie
+  const localUsers = await db.users.toArray();
+  for (const u of localUsers) {
+    if (u.email?.toLowerCase() !== 'rajifarrid@gmail.com' && u.role !== 'owner') {
+      await db.users.delete(u.uid);
+      count++;
+    }
+  }
+
+  // 2. Delete all non-owner staff from Firestore
+  try {
+    const snap = await getDocs(collection(firestore, 'users'));
+    for (const docSnap of snap.docs) {
+      const data = docSnap.data();
+      const email = (data.email || '').toLowerCase().trim();
+      if (email !== 'rajifarrid@gmail.com' && data.role !== 'owner') {
+        await deleteDoc(doc(firestore, 'users', docSnap.id));
+        count++;
+      }
+    }
+  } catch (err) {
+    console.warn('Error deleting mistake accounts from Firestore:', err);
+  }
+
+  return count;
+}
+
+// Record Owner Withdrawal: Owner takes out inventory for personal use/store maintenance
+export async function recordOwnerWithdrawal(params: {
+  shopId: string;
+  itemId: string;
+  quantity: number;
+  reason: string;
+  userId: string;
+  userName: string;
+}): Promise<OwnerWithdrawal> {
+  const item = await db.items.get(params.itemId);
+  if (!item) throw new Error('Item not found in inventory.');
+  if (item.quantity < params.quantity) {
+    throw new Error(`Insufficient stock for "${item.name}". Only ${item.quantity} available.`);
+  }
+
+  const now = Date.now();
+  const withdrawalId = `with-${now}-${Math.random().toString(36).slice(2, 7)}`;
+  const previousQty = item.quantity;
+  const newQty = item.quantity - params.quantity;
+  const totalCostValue = (item.costPrice || 0) * params.quantity;
+
+  const withdrawal: OwnerWithdrawal = {
+    id: withdrawalId,
+    shopId: params.shopId,
+    itemId: item.id,
+    itemName: item.name,
+    itemSku: item.sku,
+    quantity: params.quantity,
+    costPrice: item.costPrice || 0,
+    sellingPrice: item.sellingPrice || 0,
+    totalCostValue,
+    reason: params.reason || 'Owner Withdrawal',
+    userId: params.userId,
+    userName: params.userName,
+    createdAt: now,
+  };
+
+  // 1. Deduct stock in IndexedDB
+  await db.items.update(item.id, {
+    quantity: newQty,
+    updatedAt: now,
+  });
+
+  // 2. Add Stock Movement
+  await db.stockMovements.add({
+    id: `sm-${now}-${Math.random().toString(36).slice(2, 7)}`,
+    shopId: params.shopId,
+    itemId: item.id,
+    itemName: item.name,
+    itemSku: item.sku,
+    type: 'withdrawal',
+    qtyChange: -params.quantity,
+    previousQty,
+    newQty,
+    reason: `Owner Withdrawal: ${params.reason}`,
+    refId: withdrawalId,
+    userId: params.userId,
+    userName: params.userName,
+    createdAt: now,
+  });
+
+  // 3. Save Withdrawal record
+  await db.withdrawals.add(withdrawal);
+
+  // 4. Audit Log
+  await db.auditLogs.add({
+    id: `audit-${now}`,
+    shopId: params.shopId,
+    action: 'stock_adjusted',
+    entity: 'items',
+    entityId: item.id,
+    userId: params.userId,
+    userName: params.userName,
+    meta: {
+      action: 'owner_withdrawal',
+      quantityWithdrawn: params.quantity,
+      remainingStock: newQty,
+      costValue: totalCostValue,
+      reason: params.reason,
+    },
+    createdAt: now,
+  });
+
+  return withdrawal;
 }
 
 // Purge dummy/sample inventory, sales, and dummy accounts for clean production

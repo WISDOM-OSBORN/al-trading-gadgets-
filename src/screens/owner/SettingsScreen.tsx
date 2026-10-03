@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { User, Sale } from '../../types';
-import { db, purgeDummyData, resetDatabaseWithSeed } from '../../db';
+import { db, purgeDummyData, resetDatabaseWithSeed, deleteAllCashierStaffAccounts } from '../../db';
 import { firestore } from '../../db/firebase';
 import { doc, deleteDoc, setDoc } from 'firebase/firestore';
 import { formatDateTime } from '../../utils/formatters';
@@ -106,6 +106,10 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   const [purgePinInput, setPurgePinInput] = useState('');
   const [purgeError, setPurgeError] = useState<string | null>(null);
   const [isPurging, setIsPurging] = useState(false);
+
+  // Delete All Mistake Staff Accounts Modal
+  const [showDeleteAllModal, setShowDeleteAllModal] = useState(false);
+  const [isDeletingAll, setIsDeletingAll] = useState(false);
 
   // Status feedback
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -236,6 +240,11 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     e.preventDefault();
     if (!newSellerName.trim() || !newSellerEmail.trim() || !currentShop) return;
 
+    if (newSellerEmail.trim().toLowerCase() === 'gha@gmail.com') {
+      alert('The account gha@gmail.com has been permanently blocked from this platform.');
+      return;
+    }
+
     const newUid = `user-${Date.now()}`;
     const code = `D0${sellers.length + 1}`;
     const newUser: User = {
@@ -329,6 +338,22 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     }
   };
 
+  // Delete All Cashier/Staff Accounts created by mistake
+  const handleDeleteAllStaff = async () => {
+    try {
+      setIsDeletingAll(true);
+      const count = await deleteAllCashierStaffAccounts();
+      setShowDeleteAllModal(false);
+      await loadSellers();
+      setDispatchNotice(`Successfully deleted ${count} cashier/staff accounts. Only the primary Store Owner remains.`);
+      setTimeout(() => setDispatchNotice(null), 4000);
+    } catch (err: any) {
+      alert(`Failed to delete accounts: ${err?.message || err}`);
+    } finally {
+      setIsDeletingAll(false);
+    }
+  };
+
   // Toggle seller active
   const handleToggleSellerActive = async (user: User) => {
     if (user.role === 'owner') return;
@@ -386,9 +411,15 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     return all.filter((s) => s.status !== 'voided');
   };
 
+  const getTodayWithdrawals = async () => {
+    if (!currentShop) return [];
+    return await db.withdrawals.where('shopId').equals(currentShop.id).toArray();
+  };
+
   const handleSendToWhatsApp = async () => {
-    const sales = await getTodaySales();
-    const summary = calculateDailyClosing(sales);
+    const [sales, withdrawals] = await Promise.all([getTodaySales(), getTodayWithdrawals()]);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const summary = calculateDailyClosing(sales, todayStr, withdrawals);
     const url = generateWhatsAppClosingUrl(summary, currentShop, closingReportWhatsapp);
     window.open(url, '_blank');
     setDispatchNotice('WhatsApp message ready! Check your WhatsApp window.');
@@ -396,14 +427,16 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   };
 
   const handlePrintDailyPDF = async () => {
-    const sales = await getTodaySales();
-    const summary = calculateDailyClosing(sales);
+    const [sales, withdrawals] = await Promise.all([getTodaySales(), getTodayWithdrawals()]);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const summary = calculateDailyClosing(sales, todayStr, withdrawals);
     printDailyClosingPDF(summary, currentShop);
   };
 
   const handleSendEmailReport = async () => {
-    const sales = await getTodaySales();
-    const summary = calculateDailyClosing(sales);
+    const [sales, withdrawals] = await Promise.all([getTodaySales(), getTodayWithdrawals()]);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const summary = calculateDailyClosing(sales, todayStr, withdrawals);
     const mailto = generateEmailClosingMailto(summary, currentShop, closingReportEmail);
     window.location.href = mailto;
     setDispatchNotice('Email client opened with daily sales closing statement.');
@@ -734,20 +767,34 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
       {/* Section 4: Cashiers & Staff Accounts with Delete Key Protection */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-        <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800 gap-2">
           <div className="flex items-center gap-2">
             <Users className="w-4 h-4 text-blue-500" />
             <h2 className="font-bold text-sm text-slate-900 dark:text-white">
               Cashiers & Staff Accounts ({sellers.length})
             </h2>
           </div>
-          <button
-            onClick={() => setIsAddingSeller(true)}
-            className="px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-semibold hover:bg-slate-800 flex items-center gap-1 cursor-pointer"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Add Staff Account</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {sellers.filter((s) => s.role !== 'owner').length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowDeleteAllModal(true)}
+                className="px-3 py-1.5 rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 flex items-center gap-1 cursor-pointer transition shadow-xs"
+                title="Delete all accounts created by mistake"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete All Mistake Accounts ({sellers.filter((s) => s.role !== 'owner').length})</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsAddingSeller(true)}
+              className="px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-semibold hover:bg-slate-800 flex items-center gap-1 cursor-pointer shadow-xs"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Staff Account</span>
+            </button>
+          </div>
         </div>
 
         {/* Sellers List */}
@@ -772,7 +819,12 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
                     {user.role === 'owner' ? 'Owner' : 'Staff'}
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-500 mt-0.5">{user.email}</p>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  {user.email} &bull; Login PIN:{' '}
+                  <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
+                    {user.pin || '1234'}
+                  </span>
+                </p>
               </div>
 
               <div className="flex items-center gap-2">
@@ -1069,6 +1121,47 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 4: Delete All Mistake Staff Accounts Dialog */}
+      {showDeleteAllModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-sm w-full p-5 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4 animate-in fade-in">
+            <div className="text-center space-y-1.5">
+              <div className="w-12 h-12 rounded-full bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 mx-auto flex items-center justify-center">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                Delete All Mistake Accounts
+              </h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                This will delete all {sellers.filter((s) => s.role !== 'owner').length} cashier/staff accounts created by mistake from both this device and Cloud Firestore.
+              </p>
+              <p className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 p-2 rounded-xl border border-emerald-200 dark:border-emerald-800/60">
+                The primary Store Owner account will remain untouched.
+              </p>
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingAll}
+                onClick={() => setShowDeleteAllModal(false)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingAll}
+                onClick={handleDeleteAllStaff}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 text-white text-xs font-bold shadow-sm hover:bg-rose-700 transition disabled:opacity-50"
+              >
+                {isDeletingAll ? 'Deleting...' : 'Yes, Delete All'}
+              </button>
+            </div>
           </div>
         </div>
       )}

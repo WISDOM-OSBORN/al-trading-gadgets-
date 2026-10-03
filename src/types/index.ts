@@ -61,7 +61,23 @@ export interface Item {
   updatedAt: number;
 }
 
-export type StockMovementType = 'import' | 'sale' | 'return' | 'restock' | 'adjustment';
+export type StockMovementType = 'import' | 'sale' | 'return' | 'restock' | 'adjustment' | 'withdrawal';
+
+export interface OwnerWithdrawal {
+  id: string;
+  shopId: string;
+  itemId: string;
+  itemName: string;
+  itemSku: string;
+  quantity: number;
+  costPrice: number;
+  sellingPrice: number;
+  totalCostValue: number;
+  reason: string;
+  userId: string;
+  userName: string;
+  createdAt: number;
+}
 
 export interface StockMovement {
   id: string;
@@ -171,6 +187,7 @@ export type AuditAction =
   | 'item_created' 
   | 'item_updated' 
   | 'item_archived' 
+  | 'item_restored' 
   | 'inventory_imported' 
   | 'import_undone' 
   | 'seller_created' 

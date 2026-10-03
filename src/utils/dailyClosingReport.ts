@@ -1,4 +1,4 @@
-import { Sale, Shop } from '../types';
+import { Sale, Shop, OwnerWithdrawal } from '../types';
 import { formatCurrency, formatDateTime } from './formatters';
 
 export interface DailyClosingSummary {
@@ -12,16 +12,27 @@ export interface DailyClosingSummary {
   paymentsBreakdown: Record<string, number>;
   cashierBreakdown: Record<string, { count: number; total: number }>;
   topItems: { name: string; qty: number; total: number }[];
+  // Owner Withdrawals tracking
+  withdrawalsCount: number;
+  unitsWithdrawn: number;
+  totalWithdrawnCost: number;
+  withdrawalsList: { itemName: string; itemSku: string; qty: number; cost: number; reason: string }[];
 }
 
 export function calculateDailyClosing(
   sales: Sale[],
-  dateStr: string = new Date().toISOString().slice(0, 10)
+  dateStr: string = new Date().toISOString().slice(0, 10),
+  withdrawals: OwnerWithdrawal[] = []
 ): DailyClosingSummary {
   const daySales = sales.filter((s) => {
     if (s.status === 'voided') return false;
     const sDate = new Date(s.createdAtClient).toISOString().slice(0, 10);
     return sDate === dateStr;
+  });
+
+  const dayWithdrawals = withdrawals.filter((w) => {
+    const wDate = new Date(w.createdAt).toISOString().slice(0, 10);
+    return wDate === dateStr;
   });
 
   let totalRevenue = 0;
@@ -71,6 +82,16 @@ export function calculateDailyClosing(
     .sort((a, b) => b.qty - a.qty)
     .slice(0, 5);
 
+  const unitsWithdrawn = dayWithdrawals.reduce((sum, w) => sum + (w.quantity || 0), 0);
+  const totalWithdrawnCost = dayWithdrawals.reduce((sum, w) => sum + (w.totalCostValue || 0), 0);
+  const withdrawalsList = dayWithdrawals.map((w) => ({
+    itemName: w.itemName,
+    itemSku: w.itemSku,
+    qty: w.quantity,
+    cost: w.totalCostValue,
+    reason: w.reason,
+  }));
+
   return {
     dateStr,
     totalRevenue,
@@ -82,6 +103,10 @@ export function calculateDailyClosing(
     paymentsBreakdown,
     cashierBreakdown,
     topItems,
+    withdrawalsCount: dayWithdrawals.length,
+    unitsWithdrawn,
+    totalWithdrawnCost,
+    withdrawalsList,
   };
 }
 
@@ -128,6 +153,17 @@ export function generateWhatsAppClosingUrl(
     text += `🏆 *TOP SELLING ITEMS:*\n`;
     summary.topItems.forEach((item, idx) => {
       text += `${idx + 1}. ${item.name} (${item.qty} pcs - ${currencySymbol}${item.total.toFixed(2)})\n`;
+    });
+    text += `\n`;
+  }
+
+  // Owner Withdrawals Breakdown
+  if (summary.unitsWithdrawn > 0) {
+    text += `📦 *OWNER WITHDRAWALS / TAKEOUT:*\n`;
+    text += `• Total Units Taken: ${summary.unitsWithdrawn} pcs (${summary.withdrawalsCount} records)\n`;
+    text += `• Total Cost Value: ${currencySymbol}${summary.totalWithdrawnCost.toFixed(2)}\n`;
+    summary.withdrawalsList.forEach((w) => {
+      text += `  - ${w.qty}x ${w.itemName} (${w.reason || 'Personal Use'})\n`;
     });
     text += `\n`;
   }
@@ -219,7 +255,7 @@ export function printDailyClosingPDF(summary: DailyClosingSummary, shop: Shop | 
           </div>
           <div class="stat-card">
             <div class="stat-label">Units Deducted</div>
-            <div class="stat-val">${summary.unitsSold} pcs</div>
+            <div class="stat-val">${summary.unitsSold} sold ${summary.unitsWithdrawn > 0 ? `+ ${summary.unitsWithdrawn} takeout` : ''}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Est. Gross Margin</div>
@@ -246,6 +282,30 @@ export function printDailyClosingPDF(summary: DailyClosingSummary, shop: Shop | 
             ${topItemsHtml || '<tr><td colspan="3" style="text-align:center;padding:12px;">No items sold on this date</td></tr>'}
           </tbody>
         </table>
+
+        ${summary.unitsWithdrawn > 0 ? `
+          <div class="section-title" style="color: #b45309; border-color: #f59e0b;">Owner Inventory Takeouts / Withdrawals</div>
+          <table>
+            <thead>
+              <tr style="background:#fef3c7; color:#92400e;">
+                <th>Item & SKU</th>
+                <th style="text-align:center;">Qty</th>
+                <th style="text-align:right;">Cost Value</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${summary.withdrawalsList.map(w => `
+                <tr>
+                  <td style="padding:6px;border-bottom:1px solid #fde68a;"><b>${w.itemName}</b> <span style="font-size:9px;color:#94a3b8;">(${w.itemSku})</span></td>
+                  <td style="padding:6px;border-bottom:1px solid #fde68a;text-align:center;">${w.qty}</td>
+                  <td style="padding:6px;border-bottom:1px solid #fde68a;text-align:right;">${currencySymbol}${w.cost.toFixed(2)}</td>
+                  <td style="padding:6px;border-bottom:1px solid #fde68a;color:#78350f;">${w.reason || 'Owner Takeout'}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : ''}
 
         <div class="footer">
           <p>AL-Q ELECTRICALS &bull; End-of-Day Official Audit &bull; Generated from ShopLedger</p>
@@ -299,7 +359,19 @@ export function generateEmailClosingMailto(
   summary.topItems.forEach((it, idx) => {
     body += `${idx + 1}. ${it.name} - ${it.qty} pcs (${currencySymbol}${it.total.toFixed(2)})\n`;
   });
-  body += `\nVerified and closed via ShopLedger.`;
+  body += `\n`;
+
+  if (summary.unitsWithdrawn > 0) {
+    body += `OWNER INVENTORY WITHDRAWALS:\n`;
+    body += `- Total Units Taken: ${summary.unitsWithdrawn} pcs (${summary.withdrawalsCount} records)\n`;
+    body += `- Total Cost Value: ${currencySymbol}${summary.totalWithdrawnCost.toFixed(2)}\n`;
+    summary.withdrawalsList.forEach((w) => {
+      body += `  • ${w.qty}x ${w.itemName} (${w.reason || 'Takeout'}) [${currencySymbol}${w.cost.toFixed(2)}]\n`;
+    });
+    body += `\n`;
+  }
+
+  body += `Verified and closed via ShopLedger.`;
 
   return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
