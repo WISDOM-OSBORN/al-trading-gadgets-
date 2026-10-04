@@ -80,7 +80,7 @@ export function parseCSVFile(
             const name = getVal('name');
             let sku = getVal('sku');
             const category = getVal('category') || 'General Electrical';
-            const brand = getVal('brand') || 'Generic';
+            const brand = getVal('brand') || '';
             const costPriceStr = getVal('cost_price');
             const sellingPriceStr = getVal('selling_price');
             const quantityStr = getVal('quantity');

@@ -148,7 +148,7 @@ export const MySalesScreen: React.FC = () => {
                       Time: {sale.exactTimeSold || formatDateTime(sale.createdAtClient)}
                     </span>
                   </div>
-                  <p className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate mt-0.5">
+                  <p className="text-xs font-medium text-slate-700 dark:text-slate-200 break-words mt-1 leading-snug">
                     {sale.lines.map((l) => `${l.qty}x ${l.name}`).join(', ')}
                   </p>
                   <p className="text-[10px] text-slate-400 mt-0.5">

@@ -485,12 +485,12 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                           key={item.id}
                           className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition"
                         >
-                          <td className="px-3.5 py-3 max-w-[240px]">
-                            <p className="font-semibold text-slate-900 dark:text-white truncate">
+                          <td className="px-3.5 py-3 min-w-[220px] max-w-[360px]">
+                            <p className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white break-words leading-snug">
                               {item.name}
                             </p>
-                            <p className="text-[10px] text-slate-500 font-mono">
-                              {item.sku} {item.brand && `\u2022 ${item.brand}`}
+                            <p className="text-[11px] text-slate-500 font-mono mt-0.5 break-words">
+                              {item.sku} {item.brand && item.brand.trim() && item.brand.toLowerCase() !== 'generic' && !item.name.toLowerCase().includes(item.brand.toLowerCase()) ? `\u2022 ${item.brand}` : ''}
                             </p>
                           </td>
                           <td className="px-3.5 py-3 text-right font-medium text-slate-500">

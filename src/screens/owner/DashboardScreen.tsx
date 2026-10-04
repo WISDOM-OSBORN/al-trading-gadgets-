@@ -444,11 +444,11 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
                   className="p-2.5 rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 flex items-center justify-between gap-2"
                 >
                   <div className="min-w-0 flex-1">
-                    <p className="font-semibold text-xs text-slate-900 dark:text-white truncate">
+                    <p className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white break-words leading-snug">
                       {item.name}
                     </p>
-                    <p className="text-[10px] text-slate-500">
-                      SKU: {item.sku} &bull; Reorder trigger: {item.reorderLevel}
+                    <p className="text-[10px] text-slate-500 mt-0.5">
+                      SKU: <span className="font-mono">{item.sku}</span> &bull; Reorder trigger: {item.reorderLevel}
                     </p>
                   </div>
 
@@ -497,10 +497,10 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
                   className="flex items-center justify-between text-xs py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-none"
                 >
                   <div className="min-w-0 flex-1 pr-2">
-                    <p className="font-semibold text-slate-900 dark:text-white truncate">
+                    <p className="font-semibold text-slate-900 dark:text-white break-words leading-tight">
                       {idx + 1}. {item.name}
                     </p>
-                    <p className="text-[10px] text-slate-400">SKU: {item.sku}</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">SKU: <span className="font-mono">{item.sku}</span></p>
                   </div>
                   <div className="text-right shrink-0">
                     <p className="font-bold text-slate-900 dark:text-white">

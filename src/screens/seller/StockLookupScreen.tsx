@@ -115,11 +115,12 @@ export const StockLookupScreen: React.FC = () => {
               return (
                 <div key={item.id} className="py-3 px-2 flex items-center justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <p className="font-semibold text-xs sm:text-sm text-slate-900 dark:text-white truncate">
+                    <p className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white break-words leading-snug">
                       {item.name}
                     </p>
-                    <p className="text-[11px] text-slate-500 truncate mt-0.5">
-                      SKU: <span className="font-mono text-slate-700 dark:text-slate-300">{item.sku}</span>{item.brand ? ` \u2022 ${item.brand}` : ''}
+                    <p className="text-[11px] text-slate-500 break-words mt-0.5">
+                      SKU: <span className="font-mono text-slate-700 dark:text-slate-300 font-semibold">{item.sku}</span>
+                      {item.brand && item.brand.trim() && item.brand.toLowerCase() !== 'generic' && !item.name.toLowerCase().includes(item.brand.toLowerCase()) ? ` • ${item.brand}` : ''}
                     </p>
                     <p className="text-[10px] text-slate-400 mt-0.5">
                       Retail: {formatCurrency(item.sellingPrice, currentShop?.currency)} &bull; Reorder trigger: {item.reorderLevel} units

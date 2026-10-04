@@ -169,7 +169,7 @@ export const SalesHistoryScreen: React.FC = () => {
                     )}
                   </div>
 
-                  <p className="text-xs text-slate-700 dark:text-slate-200 font-medium truncate mt-1">
+                  <p className="text-xs text-slate-700 dark:text-slate-200 font-medium break-words mt-1 leading-snug">
                     {sale.lines.map((l) => `${l.qty}x ${l.name}`).join(', ')}
                   </p>
 
