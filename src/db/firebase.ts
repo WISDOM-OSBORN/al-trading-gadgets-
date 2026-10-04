@@ -6,6 +6,7 @@ import {
   getDoc,
   setDoc,
   deleteDoc,
+  deleteField,
   collection,
   query,
   where,
@@ -22,6 +23,7 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import { User } from '../types';
 import { db } from './index';
+import { hashPin, verifyPin } from '../utils/crypto';
 
 // Silence internal Firestore connection logs so offline fallback works seamlessly without noisy console errors
 setLogLevel('silent');
@@ -30,7 +32,7 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const firestore = initializeFirestore(
   app,
   {
-    experimentalForceLongPolling: true,
+    experimentalAutoDetectLongPolling: true,
   },
   firebaseConfig.firestoreDatabaseId || '(default)'
 );
@@ -125,7 +127,8 @@ export async function seedFirestoreBusinessDefaults(): Promise<void> {
       // non-blocking
     }
 
-    // 2. Pre-create designated owner record in Firestore
+    // 2. Pre-create designated owner record in Firestore with hashed PIN
+    const defaultOwnerHash = await hashPin('1234');
     for (const [email, info] of Object.entries(DESIGNATED_USERS)) {
       const uid = `user-${email.replace(/[^a-zA-Z0-9]/g, '_')}`;
       const userRef = doc(firestore, 'users', uid);
@@ -139,7 +142,8 @@ export async function seedFirestoreBusinessDefaults(): Promise<void> {
           role: info.role,
           deviceCode: info.deviceCode,
           active: true,
-          pin: '1234',
+          pinHash: defaultOwnerHash,
+          pin: deleteField(),
           updatedAt: Date.now(),
         },
         { merge: true }
@@ -189,6 +193,7 @@ export async function authenticateRegisteredUser(
   const designated = DESIGNATED_USERS[normalizedEmail];
   if (designated) {
     const ownerUid = customUid || 'user-rajifarrid';
+    const defaultOwnerHash = await hashPin('1234');
     const ownerUser: User = {
       uid: ownerUid,
       shopId: 'shop-electrical-01',
@@ -197,7 +202,7 @@ export async function authenticateRegisteredUser(
       role: designated.role,
       active: true,
       deviceCode: designated.deviceCode,
-      pin: '1234',
+      pinHash: defaultOwnerHash,
       createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
     };
     return { success: true, user: ownerUser };
@@ -211,6 +216,7 @@ export async function authenticateRegisteredUser(
     if (!querySnap.empty) {
       const docSnap = querySnap.docs[0];
       const data = docSnap.data();
+      const pinHash = data.pinHash || (data.pin ? await hashPin(data.pin) : await hashPin('1234'));
       foundUser = {
         uid: docSnap.id,
         shopId: data.shopId || 'shop-electrical-01',
@@ -219,14 +225,22 @@ export async function authenticateRegisteredUser(
         role: data.role || 'seller',
         active: data.active === true,
         deviceCode: data.deviceCode || 'D02',
-        pin: data.pin || '1234',
+        pinHash,
         createdAt: data.createdAt || Date.now(),
       };
+
+      // If legacy plaintext pin was in Firestore, scrub it immediately!
+      if (data.pin) {
+        try {
+          await setDoc(docSnap.ref, { pin: deleteField(), pinHash, updatedAt: Date.now() }, { merge: true });
+        } catch {}
+      }
     } else if (customUid) {
       const directDoc = await getDoc(doc(firestore, 'users', customUid));
       if (directDoc.exists()) {
         const data = directDoc.data();
         if (data.email?.toLowerCase() === normalizedEmail) {
+          const pinHash = data.pinHash || (data.pin ? await hashPin(data.pin) : await hashPin('1234'));
           foundUser = {
             uid: directDoc.id,
             shopId: data.shopId || 'shop-electrical-01',
@@ -235,9 +249,15 @@ export async function authenticateRegisteredUser(
             role: data.role || 'seller',
             active: data.active === true,
             deviceCode: data.deviceCode || 'D02',
-            pin: data.pin || '1234',
+            pinHash,
             createdAt: data.createdAt || Date.now(),
           };
+
+          if (data.pin) {
+            try {
+              await setDoc(directDoc.ref, { pin: deleteField(), pinHash, updatedAt: Date.now() }, { merge: true });
+            } catch {}
+          }
         }
       }
     }
@@ -350,18 +370,22 @@ export async function authenticateWorkerWithEmailAndPin(
 
   // Check if owner logging in via PIN
   if (normalizedEmail === 'rajifarrid@gmail.com') {
-    if (trimmedPin === '1234') {
+    const ownerLocal = await db.users.where('email').equalsIgnoreCase('rajifarrid@gmail.com').first();
+    const isOwnerMatch = await verifyPin(trimmedPin, ownerLocal?.pinHash || ownerLocal?.pin || '1234');
+    if (isOwnerMatch) {
+      const ownerHash = ownerLocal?.pinHash || (await hashPin(trimmedPin));
       const ownerUser: User = {
-        uid: 'user-rajifarrid',
+        uid: ownerLocal?.uid || 'user-rajifarrid',
         shopId: 'shop-electrical-01',
         name: 'Raji Farrid',
         email: 'rajifarrid@gmail.com',
         role: 'owner',
         active: true,
         deviceCode: 'D01',
-        pin: '1234',
-        createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+        pinHash: ownerHash,
+        createdAt: ownerLocal?.createdAt || (Date.now() - 30 * 24 * 60 * 60 * 1000),
       };
+      await db.users.put(ownerUser);
       return { success: true, user: ownerUser };
     } else {
       return { success: false, error: 'Incorrect Owner PIN code.' };
@@ -370,20 +394,25 @@ export async function authenticateWorkerWithEmailAndPin(
 
   // 1. Look up user in Firestore
   let foundUser: User | null = null;
+  let userDocRef: any = null;
   try {
     const q = query(collection(firestore, 'users'), where('email', '==', normalizedEmail));
     const snap = await getDocs(q);
     if (!snap.empty) {
-      const docData = snap.docs[0].data();
+      const docSnap = snap.docs[0];
+      const docData = docSnap.data();
+      userDocRef = docSnap.ref;
+      const pinHash = docData.pinHash || (docData.pin ? await hashPin(docData.pin) : await hashPin('1234'));
       foundUser = {
-        uid: snap.docs[0].id,
+        uid: docSnap.id,
         shopId: docData.shopId || 'shop-electrical-01',
         name: docData.name || normalizedEmail.split('@')[0],
         email: docData.email || normalizedEmail,
         role: docData.role || 'seller',
         active: docData.active === true,
         deviceCode: docData.deviceCode || 'D02',
-        pin: docData.pin || '1234',
+        pinHash,
+        pin: docData.pin,
         createdAt: docData.createdAt || Date.now(),
       };
     }
@@ -415,13 +444,26 @@ export async function authenticateWorkerWithEmailAndPin(
     };
   }
 
-  // Verify PIN
-  const registeredPin = foundUser.pin || '1234';
-  if (registeredPin !== trimmedPin) {
+  // Verify PIN securely using cryptographic hash verification
+  const isMatch = await verifyPin(trimmedPin, foundUser.pinHash || foundUser.pin || '1234');
+  if (!isMatch) {
     return {
       success: false,
       error: 'Incorrect PIN: Please check your 4-digit PIN or ask the store owner.',
     };
+  }
+
+  // If the record had an unhashed plaintext PIN, upgrade to secure hash now and clean Firestore!
+  if (foundUser.pin || !foundUser.pinHash) {
+    const freshHash = await hashPin(trimmedPin);
+    foundUser.pinHash = freshHash;
+    delete foundUser.pin;
+    try {
+      const ref = userDocRef || doc(firestore, 'users', foundUser.uid);
+      await setDoc(ref, { pin: deleteField(), pinHash: freshHash, updatedAt: Date.now() }, { merge: true });
+    } catch (e) {
+      console.warn('PIN hash migration sync notice:', e);
+    }
   }
 
   // Save/cache to local Dexie

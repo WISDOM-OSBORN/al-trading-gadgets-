@@ -4,7 +4,8 @@ import { useTheme } from '../../context/ThemeContext';
 import { User, Sale } from '../../types';
 import { db, purgeDummyData, resetDatabaseWithSeed } from '../../db';
 import { firestore, sanitizeForFirestore } from '../../db/firebase';
-import { doc, deleteDoc, setDoc, collection, getDocs } from 'firebase/firestore';
+import { doc, deleteDoc, setDoc, deleteField, collection, getDocs } from 'firebase/firestore';
+import { hashPin, verifyPin } from '../../utils/crypto';
 import { formatDateTime } from '../../utils/formatters';
 import {
   calculateDailyClosing,
@@ -114,6 +115,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
           emailLower !== 'owner@shopledger.app' &&
           emailLower !== 'alex.rivera@shopledger.app'
         ) {
+          const pinHash = data.pinHash || (data.pin ? await hashPin(data.pin) : await hashPin('1234'));
           const userDoc: User = {
             uid: d.id,
             shopId: data.shopId || currentShop.id,
@@ -122,10 +124,25 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
             role: data.role || (emailLower === 'rajifarrid@gmail.com' ? 'owner' : 'seller'),
             active: data.active !== false,
             deviceCode: data.deviceCode || 'D02',
-            pin: data.pin || '1234',
+            pinHash,
             createdAt: data.createdAt || Date.now(),
           };
           await db.users.put(userDoc);
+
+          // If plain text pin was stored in Firestore, scrub it immediately!
+          if (data.pin) {
+            try {
+              await setDoc(
+                d.ref,
+                {
+                  pin: deleteField(),
+                  pinHash,
+                  updatedAt: Date.now(),
+                },
+                { merge: true }
+              );
+            } catch {}
+          }
         }
       }
     } catch (err) {
@@ -158,6 +175,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
     // Ensure Raji Farrid (owner) is present
     if (!seenEmails.has('rajifarrid@gmail.com')) {
+      const defaultOwnerHash = await hashPin('1234');
       const raji: User = {
         uid: 'user-rajifarrid',
         shopId: currentShop.id,
@@ -166,7 +184,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
         role: 'owner',
         active: true,
         deviceCode: 'D01',
-        pin: '1234',
+        pinHash: defaultOwnerHash,
         createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
       };
       await db.users.put(raji);
@@ -204,7 +222,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     }
   }, [currentShop, currentUser]);
 
-  const ownerSecurityPin = currentUser?.pin || currentShop?.settings?.editPin || '1234';
+  const ownerSecurityPin = currentUser?.pinHash || currentUser?.pin || currentShop?.settings?.editPin || '1234';
 
   // Save Closing & Report Settings
   const handleSaveShopSettings = async (e: React.FormEvent) => {
@@ -238,6 +256,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
     const newUid = `user-${Date.now()}`;
     const code = `D0${sellers.length + 1}`;
+    const rawPin = newSellerPin.trim() || '1234';
+    const hashedPin = await hashPin(rawPin);
     const newUser: User = {
       uid: newUid,
       shopId: currentShop.id,
@@ -246,7 +266,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       role: 'seller',
       active: true,
       deviceCode: code,
-      pin: newSellerPin.trim() || '1234',
+      pinHash: hashedPin,
       createdAt: Date.now(),
     };
 
@@ -256,7 +276,14 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       await setDoc(
         userRef,
         sanitizeForFirestore({
-          ...newUser,
+          uid: newUser.uid,
+          shopId: newUser.shopId,
+          name: newUser.name,
+          email: newUser.email,
+          role: newUser.role,
+          active: newUser.active,
+          deviceCode: newUser.deviceCode,
+          pinHash: hashedPin,
           updatedAt: Date.now(),
         }),
         { merge: true }
@@ -289,7 +316,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     e.preventDefault();
     if (!sellerToDelete || !currentShop) return;
 
-    if (deletePinInput.trim() !== ownerSecurityPin && deletePinInput.trim() !== '1234') {
+    const isDeletePinValid = await verifyPin(deletePinInput.trim(), ownerSecurityPin);
+    if (!isDeletePinValid && deletePinInput.trim() !== '1234') {
       setDeleteError('Incorrect Owner Delete Key. You must enter the Admin PIN to delete this account.');
       return;
     }
@@ -345,19 +373,23 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
     try {
       setIsSavingPin(true);
-      // 1. Update in local IndexedDB
+      const hashedPin = await hashPin(cleanPin);
+
+      // 1. Update in local IndexedDB (store hash, clear plaintext)
       await db.users.update(sellerToResetPin.uid, {
-        pin: cleanPin,
+        pinHash: hashedPin,
+        pin: undefined,
       });
 
-      // 2. Update in Firebase Firestore
+      // 2. Update in Firebase Firestore (scrub plaintext pin, store pinHash)
       try {
         const userRef = doc(firestore, 'users', sellerToResetPin.uid);
         await setDoc(
           userRef,
           sanitizeForFirestore({
             ...sellerToResetPin,
-            pin: cleanPin,
+            pinHash: hashedPin,
+            pin: deleteField(),
             updatedAt: Date.now(),
           }),
           { merge: true }
@@ -368,7 +400,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
           await setDoc(
             doc(firestore, 'users', altUid),
             sanitizeForFirestore({
-              pin: cleanPin,
+              pinHash: hashedPin,
+              pin: deleteField(),
               updatedAt: Date.now(),
             }),
             { merge: true }
@@ -391,7 +424,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
         createdAt: Date.now(),
       });
 
-      setDispatchNotice(`Login PIN/password for "${sellerToResetPin.name}" reset to "${cleanPin}" successfully.`);
+      setDispatchNotice(`Login PIN for "${sellerToResetPin.name}" reset and encrypted with SHA-256 successfully.`);
       setTimeout(() => setDispatchNotice(null), 4000);
       setSellerToResetPin(null);
       setNewStaffPin('1234');
@@ -428,7 +461,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   // Purge Dummy Data Confirmation
   const handleConfirmPurgeDummyData = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (purgePinInput.trim() !== ownerSecurityPin && purgePinInput.trim() !== '1234') {
+    const isPurgePinValid = await verifyPin(purgePinInput.trim(), ownerSecurityPin);
+    if (!isPurgePinValid && purgePinInput.trim() !== '1234') {
       setPurgeError('Incorrect Security PIN. Enter your Owner PIN to authorize purging dummy data.');
       return;
     }
@@ -610,12 +644,14 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  {user.email} &bull; Login PIN:{' '}
-                  <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
-                    {user.pin || '1234'}
+                <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-500 flex-wrap">
+                  <span>{user.email}</span>
+                  <span>&bull;</span>
+                  <span className="inline-flex items-center gap-1 font-mono text-emerald-600 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.5 rounded text-[10px]" title="Protected with salted SHA-256 cryptographic hash">
+                    <Shield className="w-2.5 h-2.5" />
+                    PIN Encrypted (SHA-256)
                   </span>
-                </p>
+                </div>
               </div>
 
               <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
@@ -624,7 +660,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
                   type="button"
                   onClick={() => {
                     setSellerToResetPin(user);
-                    setNewStaffPin(user.pin || '1234');
+                    setNewStaffPin('1234');
                     setResetPinError(null);
                   }}
                   className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center gap-1 cursor-pointer transition shadow-xs"
@@ -697,12 +733,13 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
                 className="px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl"
               />
               <input
-                type="text"
+                type="password"
+                inputMode="numeric"
                 maxLength={6}
-                placeholder="Counter Quick PIN (e.g. 2026)"
+                placeholder="Quick PIN (e.g. 2026)"
                 value={newSellerPin}
                 onChange={(e) => setNewSellerPin(e.target.value)}
-                className="px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono text-center"
+                className="px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono text-center tracking-widest"
               />
             </div>
             <div className="flex justify-end gap-2 pt-1">
@@ -1008,16 +1045,24 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
             <form onSubmit={handleSaveStaffPin} className="space-y-3">
               <div>
-                <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wider mb-1">
-                  New Login PIN / Password
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wider">
+                    New Login PIN
+                  </label>
+                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
+                    <Shield className="w-2.5 h-2.5" />
+                    Encrypted with SHA-256
+                  </span>
+                </div>
                 <input
-                  type="text"
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
                   required
                   autoFocus
                   value={newStaffPin}
                   onChange={(e) => setNewStaffPin(e.target.value)}
-                  placeholder="e.g. 1234 or custom"
+                  placeholder="••••"
                   className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-center font-mono text-lg font-bold tracking-widest text-slate-900 dark:text-white"
                 />
               </div>

@@ -15,7 +15,8 @@ import {
 } from '../types';
 import { INITIAL_GADGETS, SEED_SHOP_ID } from './seedData';
 import { firestore } from './firebase';
-import { collection, getDocs, doc, deleteDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, deleteDoc, deleteField, setDoc } from 'firebase/firestore';
+import { hashPin } from '../utils/crypto';
 
 export class ShopLedgerDatabase extends Dexie {
   shops!: Table<Shop, string>;
@@ -75,6 +76,7 @@ export async function initializeDatabase() {
       createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
     };
 
+    const defaultOwnerHash = await hashPin('1234');
     const ownerUser: User = {
       uid: 'user-rajifarrid',
       shopId: SEED_SHOP_ID,
@@ -83,7 +85,7 @@ export async function initializeDatabase() {
       role: 'owner',
       active: true,
       deviceCode: 'D01',
-      pin: '1234',
+      pinHash: defaultOwnerHash,
       createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
     };
 
@@ -339,13 +341,14 @@ export async function initializeDatabase() {
       } else if (emailLower === 'rajifarrid@gmail.com') {
         if (!keptRaji) {
           keptRaji = true;
+          const ownerHash = await hashPin('1234');
           await db.users.update(u.uid, {
             name: 'Raji Farrid',
             email: 'rajifarrid@gmail.com',
             role: 'owner',
             active: true,
             deviceCode: 'D01',
-            pin: '1234',
+            pinHash: ownerHash,
           });
         } else {
           await db.users.delete(u.uid);
@@ -356,6 +359,7 @@ export async function initializeDatabase() {
 
     if (!keptRaji) {
       const shopId = existing?.id || SEED_SHOP_ID;
+      const ownerHash = await hashPin('1234');
       await db.users.put({
         uid: 'user-rajifarrid',
         shopId,
@@ -364,12 +368,12 @@ export async function initializeDatabase() {
         role: 'owner',
         active: true,
         deviceCode: 'D01',
-        pin: '1234',
+        pinHash: ownerHash,
         createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
       });
     }
 
-    // Auto-purge the mistake cashier/staff accounts from Firestore and Dexie
+    // Auto-purge the mistake cashier/staff accounts from local Dexie once
     if (!localStorage.getItem('shopledger_purged_mistake_accounts_v3')) {
       const allUsersNow = await db.users.toArray();
       for (const u of allUsersNow) {
@@ -377,42 +381,55 @@ export async function initializeDatabase() {
           await db.users.delete(u.uid);
         }
       }
-      try {
-        const snap = await getDocs(collection(firestore, 'users'));
-        for (const docSnap of snap.docs) {
-          const data = docSnap.data();
-          const email = (data.email || '').toLowerCase().trim();
-          if (email !== 'rajifarrid@gmail.com' && data.role !== 'owner') {
-            await deleteDoc(doc(firestore, 'users', docSnap.id));
-          }
-        }
-      } catch (err) {
-        console.warn('Error purging mistake accounts from Firestore:', err);
-      }
       localStorage.setItem('shopledger_purged_mistake_accounts_v3', 'true');
     }
+  }
+}
 
-    // Pull registered workers from Firestore so they persist across devices/refreshes
-    try {
-      const snap = await getDocs(collection(firestore, 'users'));
-      for (const docSnap of snap.docs) {
-        const uData = docSnap.data() as User;
-        if (
-          uData &&
-          uData.email &&
-          !blockedEmails.includes(uData.email.toLowerCase().trim())
-        ) {
-          await db.users.put({
-            ...uData,
-            uid: docSnap.id,
-          });
-        } else if (uData && uData.email && blockedEmails.includes(uData.email.toLowerCase().trim())) {
-          await db.users.delete(docSnap.id);
+// Asynchronously pull registered workers from Firestore in the background without blocking page load
+export async function syncUsersFromFirestore(): Promise<void> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return;
+  }
+
+  const blockedEmails = [
+    'gha@gmail.com',
+    'owner@shopledger.app',
+    'alex.rivera@shopledger.app',
+  ];
+
+  try {
+    const snap = await getDocs(collection(firestore, 'users'));
+    for (const docSnap of snap.docs) {
+      const uData = docSnap.data() as User;
+      const emailLower = (uData?.email || '').toLowerCase().trim();
+      if (uData && emailLower && !blockedEmails.includes(emailLower)) {
+        const pinHash = uData.pinHash || (uData.pin ? await hashPin(uData.pin) : await hashPin('1234'));
+        await db.users.put({
+          ...uData,
+          uid: docSnap.id,
+          pinHash,
+        });
+
+        // Scrub any legacy plaintext PIN from Firestore
+        if (uData.pin) {
+          try {
+            await setDoc(
+              docSnap.ref,
+              { pin: deleteField(), pinHash, updatedAt: Date.now() },
+              { merge: true }
+            );
+          } catch {}
         }
+      } else if (emailLower && blockedEmails.includes(emailLower)) {
+        await db.users.delete(docSnap.id);
+        try {
+          await deleteDoc(docSnap.ref);
+        } catch {}
       }
-    } catch {
-      // offline fallback
     }
+  } catch (err) {
+    console.warn('Background users sync notice (offline mode active):', err);
   }
 }
 

@@ -37,6 +37,7 @@ export interface User {
   active: boolean;
   deviceCode: string;
   pin?: string;
+  pinHash?: string;
   createdAt: number;
 }
 

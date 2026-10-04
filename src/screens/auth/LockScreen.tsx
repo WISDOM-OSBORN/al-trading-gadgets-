@@ -8,7 +8,7 @@ export const LockScreen: React.FC = () => {
   const [error, setError] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const expectedLength = currentUser?.pin?.length || 4;
+  const expectedLength = 4;
 
   const handleKeyPress = (num: string) => {
     if (pin.length < 6) {

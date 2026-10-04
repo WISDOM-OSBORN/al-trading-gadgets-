@@ -53,6 +53,24 @@
         "deviceCode": { "type": "string" }
       },
       "required": ["id", "invoiceNo", "shopId", "sellerId", "total", "createdAtClient"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Store cashier or owner account with cryptographically hashed credentials",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "shopId": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string" },
+        "active": { "type": "boolean" },
+        "deviceCode": { "type": "string" },
+        "pinHash": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["uid", "shopId", "name", "email", "role"]
     }
   },
   "firestore": {
@@ -67,6 +85,10 @@
     "/sales/{saleId}": {
       "schema": "Sale",
       "description": "Recorded sales transaction ledger"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Registered cashiers and staff user accounts with hashed credentials"
     }
   }
 }

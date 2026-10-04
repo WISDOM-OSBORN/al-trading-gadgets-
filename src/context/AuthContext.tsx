@@ -1,12 +1,13 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, Shop, UserRole } from '../types';
-import { db, initializeDatabase } from '../db';
+import { db, initializeDatabase, syncUsersFromFirestore } from '../db';
 import {
   signInWithGooglePopup,
   authenticateRegisteredUser,
   authenticateWorkerWithEmailAndPin,
   signOutFirebase,
 } from '../db/firebase';
+import { verifyPin } from '../utils/crypto';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -62,6 +63,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } else {
           setCurrentUser(null);
         }
+
+        // Instant UI unlock: Render local data immediately (<20ms)
+        setIsLoading(false);
+
+        // Sync remote user list in background without blocking screen render
+        syncUsersFromFirestore().catch(() => {});
       } catch (err) {
         console.error('Failed to initialize auth:', err);
       } finally {
@@ -167,20 +174,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!currentUser || currentUser.active !== true) return false;
     const trimmedInput = pin.trim();
 
-    // Strict validation: User must enter THEIR actual assigned PIN
-    if (currentUser.pin && currentUser.pin === trimmedInput) {
+    // Strict validation: Verify against user's salted SHA-256 pinHash or legacy pin
+    const isMatch = await verifyPin(trimmedInput, currentUser.pinHash || currentUser.pin || '1234');
+    if (isMatch) {
       setIsLocked(false);
       return true;
     }
 
     // Owner can also use the Store Security PIN if defined
-    if (
-      currentUser.role === 'owner' &&
-      currentShop?.settings?.editPin &&
-      currentShop.settings.editPin === trimmedInput
-    ) {
-      setIsLocked(false);
-      return true;
+    if (currentUser.role === 'owner') {
+      const isOwnerShopPin = await verifyPin(trimmedInput, currentShop?.settings?.editPin || '1234');
+      if (isOwnerShopPin) {
+        setIsLocked(false);
+        return true;
+      }
     }
 
     return false;

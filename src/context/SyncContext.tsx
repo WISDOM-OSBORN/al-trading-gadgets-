@@ -9,6 +9,7 @@ interface SyncContextType {
   lastSyncedTime: number | null;
   syncBannerMessage: string | null;
   triggerSync: () => Promise<void>;
+  syncFullInventory: () => Promise<void>;
   simulateOfflineToggle: () => void;
   isSimulatedOffline: boolean;
 }
@@ -47,18 +48,13 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSyncBannerMessage(`Syncing ${pendingCount} pending change${pendingCount > 1 ? 's' : ''}...`);
       }
 
+      // Fast queue processing (only sends pending sales, stock updates, voids)
       const result = await processSyncQueue();
-
-      // Ensure all inventory items, imports, and withdrawals are synced to Cloud Firestore
-      const shop = await db.shops.toCollection().first();
-      if (shop) {
-        await syncAllInventoryToFirestore(shop.id);
-      }
 
       if (result.synced > 0) {
         setSyncBannerMessage(`All synced (${result.synced} item${result.synced > 1 ? 's' : ''})`);
         setLastSyncedTime(Date.now());
-        setTimeout(() => setSyncBannerMessage(null), 3500);
+        setTimeout(() => setSyncBannerMessage(null), 3000);
       } else {
         setSyncBannerMessage(null);
       }
@@ -67,7 +63,29 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err: any) {
       console.warn('Sync notice (offline/retry):', err?.message || err);
       setSyncBannerMessage('Offline Mode — will retry sync when reconnected');
-      setTimeout(() => setSyncBannerMessage(null), 4000);
+      setTimeout(() => setSyncBannerMessage(null), 3000);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [effectiveOnline, isSyncing, refreshPendingCount]);
+
+  // Explicit full catalog sync (called on demand from settings or imports)
+  const syncFullInventory = useCallback(async () => {
+    if (!effectiveOnline || isSyncing) return;
+    try {
+      setIsSyncing(true);
+      setSyncBannerMessage('Syncing full inventory catalog to cloud...');
+      const shop = await db.shops.toCollection().first();
+      if (shop) {
+        await syncAllInventoryToFirestore(shop.id);
+      }
+      await processSyncQueue();
+      setSyncBannerMessage('Full inventory catalog synced to Cloud.');
+      setLastSyncedTime(Date.now());
+      setTimeout(() => setSyncBannerMessage(null), 3500);
+      await refreshPendingCount();
+    } catch (err: any) {
+      console.warn('Full sync notice:', err);
     } finally {
       setIsSyncing(false);
     }
@@ -126,6 +144,7 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
         lastSyncedTime,
         syncBannerMessage,
         triggerSync,
+        syncFullInventory,
         simulateOfflineToggle,
         isSimulatedOffline,
       }}
