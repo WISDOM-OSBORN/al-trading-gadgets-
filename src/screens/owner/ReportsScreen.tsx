@@ -48,6 +48,13 @@ export const ReportsScreen: React.FC = () => {
 
   useEffect(() => {
     loadData();
+    const handleUpdate = () => {
+      loadData();
+    };
+    window.addEventListener('shopledger_sales_updated', handleUpdate);
+    return () => {
+      window.removeEventListener('shopledger_sales_updated', handleUpdate);
+    };
   }, [currentShop]);
 
   // Filter sales for the selected date

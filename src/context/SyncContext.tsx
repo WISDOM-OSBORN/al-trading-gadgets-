@@ -5,6 +5,8 @@ import {
   syncAllInventoryToFirestore,
   pullInventoryFromFirestore,
   subscribeToCloudInventory,
+  subscribeToCloudSales,
+  pullSalesFromFirestore,
 } from '../db/sync';
 
 interface SyncContextType {
@@ -48,38 +50,20 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     try {
       setIsSyncing(true);
-      const pendingCount = await db.syncQueue.where('status').equals('pending').count();
-      if (pendingCount > 0) {
-        setSyncBannerMessage(`Syncing ${pendingCount} pending change${pendingCount > 1 ? 's' : ''}...`);
-      }
 
       // 1. Process pending local queue (send sales, edits, voids)
-      const result = await processSyncQueue();
+      await processSyncQueue();
 
-      // 2. Pull latest Cloud Firestore inventory so all devices match
+      // 2. Pull latest Cloud Firestore inventory & sales so all devices match
       const shop = await db.shops.toCollection().first();
-      let pulledCount = 0;
-      if (shop) {
-        const pullRes = await pullInventoryFromFirestore(shop.id);
-        pulledCount = pullRes.pulled;
-      }
+      const shopId = shop?.id || 'shop-electrical-01';
+      await pullInventoryFromFirestore(shopId);
+      await pullSalesFromFirestore(shopId);
 
-      if (result.synced > 0 || pulledCount > 0) {
-        const parts: string[] = [];
-        if (result.synced > 0) parts.push(`${result.synced} change${result.synced > 1 ? 's' : ''} saved`);
-        if (pulledCount > 0) parts.push(`${pulledCount} items synced`);
-        setSyncBannerMessage(`Cloud synced (${parts.join(', ')})`);
-        setLastSyncedTime(Date.now());
-        setTimeout(() => setSyncBannerMessage(null), 3000);
-      } else {
-        setSyncBannerMessage(null);
-      }
-
+      setLastSyncedTime(Date.now());
       await refreshPendingCount();
     } catch (err: any) {
       console.warn('Sync notice (offline/retry):', err?.message || err);
-      setSyncBannerMessage('Offline Mode — will retry sync when reconnected');
-      setTimeout(() => setSyncBannerMessage(null), 3000);
     } finally {
       setIsSyncing(false);
     }
@@ -90,16 +74,13 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!effectiveOnline || isSyncing) return;
     try {
       setIsSyncing(true);
-      setSyncBannerMessage('Reconciling full inventory catalog with cloud...');
       const shop = await db.shops.toCollection().first();
-      if (shop) {
-        await syncAllInventoryToFirestore(shop.id, true);
-        await pullInventoryFromFirestore(shop.id);
-      }
+      const shopId = shop?.id || 'shop-electrical-01';
+      await syncAllInventoryToFirestore(shopId, true);
+      await pullInventoryFromFirestore(shopId);
+      await pullSalesFromFirestore(shopId);
       await processSyncQueue();
-      setSyncBannerMessage('Full inventory catalog synchronized across all devices.');
       setLastSyncedTime(Date.now());
-      setTimeout(() => setSyncBannerMessage(null), 3500);
       await refreshPendingCount();
     } catch (err: any) {
       console.warn('Full sync notice:', err);
@@ -108,22 +89,29 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [effectiveOnline, isSyncing, refreshPendingCount]);
 
-  // Real-time listener for Cloud Firestore inventory updates
+  // Real-time listener for Cloud Firestore inventory & sales updates
   useEffect(() => {
-    let unsub: (() => void) | undefined;
+    let unsubInventory: (() => void) | undefined;
+    let unsubSales: (() => void) | undefined;
+
     async function initListener() {
       const shop = await db.shops.toCollection().first();
-      if (shop && effectiveOnline) {
+      const shopId = shop?.id || 'shop-electrical-01';
+      if (effectiveOnline) {
         // Initial non-blocking pull
-        pullInventoryFromFirestore(shop.id).catch(() => {});
-        // Real-time Firestore subscription
-        unsub = subscribeToCloudInventory(shop.id);
+        pullInventoryFromFirestore(shopId).catch(() => {});
+        pullSalesFromFirestore(shopId).catch(() => {});
+
+        // Real-time Firestore subscriptions across devices
+        unsubInventory = subscribeToCloudInventory(shopId);
+        unsubSales = subscribeToCloudSales(shopId);
       }
     }
     initListener();
 
     return () => {
-      unsub?.();
+      unsubInventory?.();
+      unsubSales?.();
     };
   }, [effectiveOnline]);
 

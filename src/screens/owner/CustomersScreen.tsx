@@ -35,6 +35,13 @@ export const CustomersScreen: React.FC = () => {
 
   useEffect(() => {
     loadCustomers();
+    const handleUpdate = () => {
+      loadCustomers();
+    };
+    window.addEventListener('shopledger_sales_updated', handleUpdate);
+    return () => {
+      window.removeEventListener('shopledger_sales_updated', handleUpdate);
+    };
   }, [currentShop]);
 
   const filtered = customers.filter((c) => {

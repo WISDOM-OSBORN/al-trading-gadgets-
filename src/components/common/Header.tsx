@@ -1,20 +1,36 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSync } from '../../context/SyncContext';
 import { useTheme } from '../../context/ThemeContext';
+import { db } from '../../db';
+import { User } from '../../types';
 import { ScreenId } from './BottomNav';
-import { Lock, LogOut, ChevronDown, RefreshCw, Sun, Moon } from 'lucide-react';
+import { Lock, LogOut, ChevronDown, RefreshCw, Sun, Moon, Users, Check } from 'lucide-react';
 
 interface HeaderProps {
   onNavigate?: (screen: ScreenId) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({ onNavigate }) => {
-  const { currentUser, currentShop, lockScreen, logout } = useAuth();
-  const { isOnline, isSyncing, pendingSyncCount, triggerSync } = useSync();
+  const { currentUser, currentShop, lockScreen, logout, switchUser } = useAuth();
+  const { isOnline, isSyncing, triggerSync } = useSync();
   const { isDark, toggleTheme } = useTheme();
   const [showMenu, setShowMenu] = useState(false);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
   const isOwner = currentUser?.role === 'owner';
+
+  useEffect(() => {
+    const loadUsers = async () => {
+      try {
+        const users = await db.users.toArray();
+        const activeUsers = users.filter((u) => u.active !== false);
+        setAllUsers(activeUsers);
+      } catch {}
+    };
+    loadUsers();
+    window.addEventListener('shopledger_users_updated', loadUsers);
+    return () => window.removeEventListener('shopledger_users_updated', loadUsers);
+  }, []);
 
   return (
     <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 border-b border-slate-200 dark:border-slate-800 px-3 py-2 transition-colors">
@@ -38,18 +54,16 @@ export const Header: React.FC<HeaderProps> = ({ onNavigate }) => {
 
         {/* Right: Minimal Sync, Theme Toggle & Account */}
         <div className="flex items-center gap-1.5 sm:gap-2">
-          {/* Subtle sync trigger if pending */}
-          {pendingSyncCount > 0 && (
-            <button
-              onClick={triggerSync}
-              disabled={isSyncing}
-              className="text-[11px] font-semibold text-amber-600 dark:text-amber-400 flex items-center gap-1 hover:underline cursor-pointer px-1"
-              title="Sync pending records"
-            >
-              <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
-              <span>{pendingSyncCount}</span>
-            </button>
-          )}
+          {/* Top Cloud Sync Status & Manual Trigger - Pure Moving Icon without Box or Bar */}
+          <button
+            onClick={triggerSync}
+            disabled={isSyncing}
+            className="p-1.5 text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 transition cursor-pointer flex items-center justify-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+            title={isSyncing ? 'Syncing with cloud...' : 'Sync (Tap to refresh)'}
+            aria-label="Cloud sync"
+          >
+            <RefreshCw className={`w-4 h-4 transition-transform duration-700 ${isSyncing ? 'animate-spin text-emerald-500' : ''}`} />
+          </button>
 
           {/* 1-Tap Theme Toggle: Crisp Sun / Moon */}
           <button
@@ -81,26 +95,72 @@ export const Header: React.FC<HeaderProps> = ({ onNavigate }) => {
             {showMenu && (
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
-                <div className="absolute right-0 mt-1.5 w-56 rounded-2xl bg-white dark:bg-slate-900 shadow-xl border border-slate-200 dark:border-slate-800 p-2 z-50 text-xs animate-in fade-in">
-                  {/* Active Logged In Account Details Only */}
-                  <div className="p-2.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl mb-1.5 border border-slate-100 dark:border-slate-800">
+                <div className="absolute right-0 mt-1.5 w-64 rounded-2xl bg-white dark:bg-slate-900 shadow-xl border border-slate-200 dark:border-slate-800 p-2 z-50 text-xs animate-in fade-in">
+                  {/* Active Logged In Account Details */}
+                  <div className="p-2.5 bg-emerald-50/70 dark:bg-emerald-950/40 rounded-xl mb-1.5 border border-emerald-100 dark:border-emerald-900/60">
                     <div className="flex items-center justify-between gap-1.5">
                       <p className="font-bold text-xs text-slate-900 dark:text-white truncate">
                         {currentUser?.name}
                       </p>
-                      <span className="text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-400 shrink-0">
+                      <span className="text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-emerald-200/80 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-300 shrink-0">
                         {currentUser?.role === 'owner' ? 'Owner' : 'Staff'}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400 truncate mt-0.5">
                       {currentUser?.email}
                     </p>
                     {currentUser?.deviceCode && (
-                      <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1 font-mono">
-                        Terminal: {currentUser.deviceCode}
+                      <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 font-mono">
+                        Terminal: {currentUser.deviceCode} (Active)
                       </p>
                     )}
                   </div>
+
+                  {/* All Shop Accounts & Staff - visible on any logged in account */}
+                  {allUsers.length > 1 && (
+                    <div className="mb-2">
+                      <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                        <span className="flex items-center gap-1">
+                          <Users className="w-3 h-3" />
+                          <span>All Shop Accounts</span>
+                        </span>
+                        <span className="text-[9px] font-mono">{allUsers.length}</span>
+                      </div>
+                      <div className="max-h-36 overflow-y-auto space-y-1 pr-0.5">
+                        {allUsers.map((u) => {
+                          const isCurrent = u.uid === currentUser?.uid;
+                          return (
+                            <div
+                              key={u.uid}
+                              onClick={() => {
+                                if (!isCurrent) {
+                                  switchUser(u.uid);
+                                  setShowMenu(false);
+                                }
+                              }}
+                              className={`p-1.5 rounded-lg flex items-center justify-between transition cursor-pointer text-[11px] ${
+                                isCurrent
+                                  ? 'bg-slate-100 dark:bg-slate-800 font-semibold text-slate-900 dark:text-white'
+                                  : 'hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-600 dark:text-slate-300'
+                              }`}
+                              title={isCurrent ? 'Currently active account' : `Switch to ${u.name}`}
+                            >
+                              <div className="min-w-0 pr-1">
+                                <p className="truncate font-medium">{u.name}</p>
+                                <p className="text-[10px] text-slate-400 truncate">{u.email}</p>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                  {u.role === 'owner' ? 'Owner' : u.deviceCode || 'Staff'}
+                                </span>
+                                {isCurrent && <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Toggle Theme in menu */}
                   <button

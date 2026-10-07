@@ -14,6 +14,8 @@ import {
 } from 'firebase/firestore';
 import {
   Item,
+  Shop,
+  User,
   Sale,
   SaleLineItem,
   SalePayment,
@@ -223,11 +225,39 @@ export async function recordSale(params: RecordSaleParams): Promise<Sale> {
       action: 'create',
       payload: newSale,
       attempts: 0,
-      status: navigator.onLine ? 'synced' : 'pending',
+      status: 'pending',
       createdAt: now,
     };
     await db.syncQueue.add(syncItem);
   });
+
+  // 6. Direct real-time write to Firestore if online
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    try {
+      await setDoc(doc(firestore, 'sales', newSale.id), sanitizeForFirestore(newSale), { merge: true });
+      await db.sales.update(newSale.id, { syncedAt: now });
+      await db.syncQueue.update(`sync-${saleId}`, { status: 'synced' });
+
+      // Update item quantities in Firestore
+      for (const line of lines) {
+        const currentItem = await db.items.get(line.itemId);
+        if (currentItem) {
+          await setDoc(
+            doc(firestore, 'items', line.itemId),
+            { quantity: currentItem.quantity, updatedAt: now },
+            { merge: true }
+          );
+        }
+      }
+    } catch (fErr) {
+      console.warn('Direct Firestore sale write scheduled to retry:', fErr);
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
+    window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+  }
 
   return newSale;
 }
@@ -331,11 +361,42 @@ export async function voidSale(
       action: 'update',
       payload: { id: saleId, status: 'voided', voidReason, voidedAt: now, voidedBy: userName },
       attempts: 0,
-      status: navigator.onLine ? 'synced' : 'pending',
+      status: 'pending',
       createdAt: now,
     };
     await db.syncQueue.add(syncItem);
   });
+
+  // Direct live Firestore write if online
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    try {
+      const sale = await db.sales.get(saleId);
+      if (sale) {
+        await setDoc(
+          doc(firestore, 'sales', saleId),
+          { status: 'voided', voidReason, voidedAt: now, voidedBy: userName },
+          { merge: true }
+        );
+        for (const line of sale.lines) {
+          const currentItem = await db.items.get(line.itemId);
+          if (currentItem) {
+            await setDoc(
+              doc(firestore, 'items', line.itemId),
+              { quantity: currentItem.quantity, updatedAt: now },
+              { merge: true }
+            );
+          }
+        }
+      }
+    } catch (fErr) {
+      console.warn('Direct Firestore void write notice:', fErr);
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
+    window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+  }
 }
 
 // Adjust stock with reason
@@ -406,10 +467,27 @@ export async function adjustStock(params: {
       action: 'update',
       payload: { id: itemId, quantity: finalQty },
       attempts: 0,
-      status: navigator.onLine ? 'synced' : 'pending',
+      status: 'pending',
       createdAt: now,
     });
   });
+
+  // Direct live Firestore write if online
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    try {
+      await setDoc(
+        doc(firestore, 'items', itemId),
+        { quantity: finalQty, updatedAt: now },
+        { merge: true }
+      );
+    } catch (fErr) {
+      console.warn('Direct Firestore stock adjust write notice:', fErr);
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+  }
 
   return finalQty;
 }
@@ -573,7 +651,14 @@ export async function pullInventoryFromFirestore(shopId: string): Promise<{ pull
     }
 
     if (snap.empty) {
-      return { pulled: 0, removed: 0 };
+      const locCount = await db.items.count();
+      if (locCount > 0) {
+        await db.items.clear();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+        }
+      }
+      return { pulled: 0, removed: locCount };
     }
 
     const cloudItems: Item[] = [];
@@ -635,7 +720,15 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
       itemsCol,
       async (snap) => {
         try {
-          if (snap.empty) return;
+          if (snap.empty) {
+            await db.items.clear();
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+            }
+            onChange?.();
+            return;
+          }
+
           const cloudItems: Item[] = [];
           const cloudIds = new Set<string>();
           for (const d of snap.docs) {
@@ -681,6 +774,92 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
     return unsub;
   } catch {
     return () => {};
+  }
+}
+
+// Real-time listener for Firestore sales so transactions show across all devices
+export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]) => void): () => void {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return () => {};
+  }
+
+  try {
+    const salesCol = collection(firestore, 'sales');
+    const unsub = onSnapshot(
+      salesCol,
+      async (snap) => {
+        try {
+          const cloudSales: Sale[] = [];
+          for (const d of snap.docs) {
+            const data = d.data() as Sale;
+            if (data && data.lines) {
+              cloudSales.push({
+                ...data,
+                id: d.id,
+                shopId: data.shopId || shopId || 'shop-electrical-01',
+                subtotal: Number(data.subtotal) || Number(data.total) || 0,
+                total: Number(data.total) || 0,
+                createdAtClient: Number(data.createdAtClient) || Date.now(),
+              });
+            }
+          }
+
+          if (cloudSales.length > 0) {
+            await db.sales.bulkPut(cloudSales);
+          }
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
+          }
+          onChange?.(cloudSales);
+        } catch (err) {
+          console.warn('Real-time sales sync processing notice:', err);
+        }
+      },
+      (err) => console.warn('Sales listener notice:', err)
+    );
+    return unsub;
+  } catch {
+    return () => {};
+  }
+}
+
+// Pull sales from Firestore on initial load or manual refresh
+export async function pullSalesFromFirestore(shopId?: string): Promise<{ pulled: number }> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { pulled: 0 };
+  }
+
+  try {
+    const salesCol = collection(firestore, 'sales');
+    const snap = await getDocs(salesCol);
+    const cloudSales: Sale[] = [];
+    for (const d of snap.docs) {
+      const data = d.data() as Sale;
+      if (data && data.lines) {
+        cloudSales.push({
+          ...data,
+          id: d.id,
+          shopId: data.shopId || shopId || 'shop-electrical-01',
+          subtotal: Number(data.subtotal) || Number(data.total) || 0,
+          total: Number(data.total) || 0,
+          createdAtClient: Number(data.createdAtClient) || Date.now(),
+        });
+      }
+    }
+
+    if (cloudSales.length > 0) {
+      await db.sales.bulkPut(cloudSales);
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
+    }
+
+    return { pulled: cloudSales.length };
+  } catch (err) {
+    console.warn('Pull sales error (offline):', err);
+    return { pulled: 0 };
   }
 }
 
@@ -777,5 +956,153 @@ export async function deleteItemAcrossDevices(
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+  }
+}
+
+// Pull latest shop settings & profile from Firestore
+export async function pullShopFromFirestore(shopId: string): Promise<Shop | null> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return null;
+  }
+  try {
+    const targetShopId = shopId || 'shop-electrical-01';
+    const snap = await getDoc(doc(firestore, 'shops', targetShopId));
+    if (snap.exists()) {
+      const data = snap.data();
+      const local = await db.shops.get(targetShopId);
+      const mergedShop: Shop = {
+        id: targetShopId,
+        name: data.name || local?.name || 'AL-Q ELECTRICALS',
+        currency: data.currency || local?.currency || 'GHS',
+        currencySymbol: data.currencySymbol || local?.currencySymbol || 'GH₵',
+        phone: data.phone || local?.phone || '+233 24 123 4567',
+        address: data.address || local?.address || 'Accra, Ghana',
+        taxRate: typeof data.taxRate === 'number' ? data.taxRate : (local?.taxRate ?? 0),
+        settings: {
+          ...(local?.settings || {}),
+          ...(data.settings || {}),
+        },
+        createdAt: data.createdAt || local?.createdAt || Date.now(),
+      };
+      await db.shops.put(mergedShop);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('shopledger_shop_updated', { detail: mergedShop }));
+      }
+      return mergedShop;
+    }
+  } catch (err) {
+    console.warn('Pull shop notice (offline):', err);
+  }
+  return null;
+}
+
+// Real-time listener for shop profile and settings across all devices
+export function subscribeToCloudShop(shopId: string, onChange?: (shop: Shop) => void): () => void {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return () => {};
+  }
+  try {
+    const targetShopId = shopId || 'shop-electrical-01';
+    const unsub = onSnapshot(
+      doc(firestore, 'shops', targetShopId),
+      async (snap) => {
+        try {
+          if (!snap.exists()) return;
+          const data = snap.data();
+          const local = await db.shops.get(targetShopId);
+          const mergedShop: Shop = {
+            id: targetShopId,
+            name: data.name || local?.name || 'AL-Q ELECTRICALS',
+            currency: data.currency || local?.currency || 'GHS',
+            currencySymbol: data.currencySymbol || local?.currencySymbol || 'GH₵',
+            phone: data.phone || local?.phone || '+233 24 123 4567',
+            address: data.address || local?.address || 'Accra, Ghana',
+            taxRate: typeof data.taxRate === 'number' ? data.taxRate : (local?.taxRate ?? 0),
+            settings: {
+              ...(local?.settings || {}),
+              ...(data.settings || {}),
+            },
+            createdAt: data.createdAt || local?.createdAt || Date.now(),
+          };
+          await db.shops.put(mergedShop);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('shopledger_shop_updated', { detail: mergedShop }));
+          }
+          onChange?.(mergedShop);
+        } catch (inner) {
+          console.warn('Shop real-time update error:', inner);
+        }
+      },
+      (err) => console.warn('Shop listener notice:', err)
+    );
+    return unsub;
+  } catch {
+    return () => {};
+  }
+}
+
+// Real-time listener for staff accounts so accounts created by admin appear immediately on all devices
+export function subscribeToCloudUsers(onChange?: (users: User[]) => void): () => void {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return () => {};
+  }
+  try {
+    const unsub = onSnapshot(
+      collection(firestore, 'users'),
+      async (snap) => {
+        try {
+          const blockedEmails = [
+            'gha@gmail.com',
+            'owner@shopledger.app',
+            'alex.rivera@shopledger.app',
+          ];
+          const cloudUsers: User[] = [];
+          const cloudIds = new Set<string>();
+
+          for (const d of snap.docs) {
+            const data = d.data() as User;
+            const emailLower = (data?.email || '').toLowerCase().trim();
+            if (emailLower && !blockedEmails.includes(emailLower)) {
+              const u: User = {
+                uid: d.id,
+                shopId: data.shopId || 'shop-electrical-01',
+                name: data.name || emailLower.split('@')[0],
+                email: data.email,
+                role: data.role || (emailLower === 'rajifarrid@gmail.com' ? 'owner' : 'seller'),
+                active: data.active !== false,
+                deviceCode: data.deviceCode || 'D01',
+                pinHash: data.pinHash || '1234',
+                createdAt: data.createdAt || Date.now(),
+              };
+              cloudUsers.push(u);
+              cloudIds.add(d.id);
+            }
+          }
+
+          if (cloudUsers.length > 0) {
+            await db.users.bulkPut(cloudUsers);
+          }
+
+          // Remove any local non-owner user deleted from Firestore
+          const localUsers = await db.users.toArray();
+          for (const loc of localUsers) {
+            if (loc.email?.toLowerCase() !== 'rajifarrid@gmail.com' && !cloudIds.has(loc.uid)) {
+              await db.users.delete(loc.uid);
+            }
+          }
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('shopledger_users_updated'));
+          }
+          onChange?.(cloudUsers);
+        } catch (inner) {
+          console.warn('Real-time users sync error:', inner);
+        }
+      },
+      (err) => console.warn('Users listener notice:', err)
+    );
+    return unsub;
+  } catch {
+    return () => {};
   }
 }

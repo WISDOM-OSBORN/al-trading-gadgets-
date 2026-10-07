@@ -34,6 +34,7 @@ import {
   Mail,
   Share2,
   KeyRound,
+  Building2,
 } from 'lucide-react';
 
 interface SettingsScreenProps {
@@ -41,8 +42,28 @@ interface SettingsScreenProps {
 }
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }) => {
-  const { currentShop, currentUser, updateShopSettings } = useAuth();
+  const { currentShop, currentUser, updateShopSettings, updateShopDetails } = useAuth();
   const { theme, setTheme, isDark, toggleTheme } = useTheme();
+
+  // Business Profile
+  const [businessName, setBusinessName] = useState(
+    currentShop?.name || 'AL-Q ELECTRICALS'
+  );
+  const [businessPhone, setBusinessPhone] = useState(
+    currentShop?.phone || '+233 24 123 4567'
+  );
+  const [businessAddress, setBusinessAddress] = useState(
+    currentShop?.address || 'Accra, Ghana'
+  );
+  const [currencySymbol, setCurrencySymbol] = useState(
+    currentShop?.currencySymbol || 'GH₵'
+  );
+  const [currencyCode, setCurrencyCode] = useState(
+    currentShop?.currency || 'GHS'
+  );
+  const [taxRate, setTaxRate] = useState<number>(
+    currentShop?.taxRate ?? 0
+  );
 
   // Settings toggles
   const [allowPriceOverride, setAllowPriceOverride] = useState(
@@ -207,6 +228,13 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
   useEffect(() => {
     if (currentShop) {
+      setBusinessName(currentShop.name || 'AL-Q ELECTRICALS');
+      setBusinessPhone(currentShop.phone || '+233 24 123 4567');
+      setBusinessAddress(currentShop.address || 'Accra, Ghana');
+      setCurrencySymbol(currentShop.currencySymbol || 'GH₵');
+      setCurrencyCode(currentShop.currency || 'GHS');
+      setTaxRate(currentShop.taxRate ?? 0);
+
       setAllowPriceOverride(currentShop.settings.allowPriceOverride);
       setAllowNegativeStock(currentShop.settings.allowNegativeStock);
       setInvoicePrefix(currentShop.settings.invoicePrefix);
@@ -222,12 +250,54 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     }
   }, [currentShop, currentUser]);
 
+  // Real-time synchronization listeners across devices
+  useEffect(() => {
+    const handleUsersUpdate = () => {
+      loadSellers();
+    };
+    const handleShopUpdate = (e: any) => {
+      if (e.detail) {
+        setBusinessName(e.detail.name || 'AL-Q ELECTRICALS');
+        setBusinessPhone(e.detail.phone || '');
+        setBusinessAddress(e.detail.address || '');
+        setCurrencySymbol(e.detail.currencySymbol || 'GH₵');
+        setCurrencyCode(e.detail.currency || 'GHS');
+        setTaxRate(e.detail.taxRate ?? 0);
+        if (e.detail.settings) {
+          setAllowPriceOverride(e.detail.settings.allowPriceOverride ?? true);
+          setAllowNegativeStock(e.detail.settings.allowNegativeStock ?? false);
+          setInvoicePrefix(e.detail.settings.invoicePrefix || 'INV');
+          setReceiptFooter(e.detail.settings.receiptFooter || '');
+          setClosingTime(e.detail.settings.closingTime || '20:00');
+          setClosingReportEmail(e.detail.settings.closingReportEmail || '');
+          setClosingReportWhatsapp(e.detail.settings.closingReportWhatsapp || '');
+          setAutoDispatchReport(e.detail.settings.autoDispatchReport ?? true);
+        }
+      }
+    };
+    window.addEventListener('shopledger_users_updated', handleUsersUpdate);
+    window.addEventListener('shopledger_shop_updated', handleShopUpdate);
+    return () => {
+      window.removeEventListener('shopledger_users_updated', handleUsersUpdate);
+      window.removeEventListener('shopledger_shop_updated', handleShopUpdate);
+    };
+  }, []);
+
   const ownerSecurityPin = currentUser?.pinHash || currentUser?.pin || currentShop?.settings?.editPin || '1234';
 
-  // Save Closing & Report Settings
+  // Save Shop Profile, Closing & Report Settings Across All Devices
   const handleSaveShopSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentShop) return;
+
+    await updateShopDetails({
+      name: businessName.trim() || 'AL-Q ELECTRICALS',
+      phone: businessPhone.trim(),
+      address: businessAddress.trim(),
+      currency: currencyCode.trim() || 'GHS',
+      currencySymbol: currencySymbol.trim() || 'GH₵',
+      taxRate: Number(taxRate) || 0,
+    });
 
     await updateShopSettings({
       allowPriceOverride,
@@ -309,6 +379,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     setNewSellerPin('1234');
     setIsAddingSeller(false);
     await loadSellers();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shopledger_users_updated'));
+    }
   };
 
   // Delete Seller with Owner Delete Key / PIN
@@ -354,6 +427,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       setDeletePinInput('');
       setDeleteError(null);
       await loadSellers();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('shopledger_users_updated'));
+      }
       setDispatchNotice(`Staff account "${sellerToDelete.name}" deleted successfully.`);
       setTimeout(() => setDispatchNotice(null), 3500);
     } catch (err: any) {
@@ -430,6 +506,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       setNewStaffPin('1234');
       setResetPinError(null);
       await loadSellers();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('shopledger_users_updated'));
+      }
     } catch (err: any) {
       setResetPinError(`Failed to update PIN: ${err?.message || err}`);
     } finally {
@@ -456,6 +535,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
     }
 
     await loadSellers();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shopledger_users_updated'));
+    }
   };
 
   // Purge Dummy Data Confirmation

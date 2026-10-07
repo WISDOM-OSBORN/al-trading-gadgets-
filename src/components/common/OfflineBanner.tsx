@@ -5,31 +5,12 @@ import { Wifi, WifiOff, RefreshCw, AlertCircle, CheckCircle2 } from 'lucide-reac
 export const OfflineBanner: React.FC = () => {
   const {
     isOnline,
-    isSyncing,
     pendingSyncCount,
-    syncBannerMessage,
-    triggerSync,
-    simulateOfflineToggle,
-    isSimulatedOffline,
   } = useSync();
 
   return (
     <>
-      {/* Toast Notification for Sync Events */}
-      {syncBannerMessage && (
-        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-slate-900/95 text-white shadow-xl text-xs font-medium flex items-center gap-2 border border-slate-700 backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-200">
-          {syncBannerMessage.includes('All synced') ? (
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-          ) : syncBannerMessage.includes('Offline') ? (
-            <WifiOff className="w-3.5 h-3.5 text-amber-400" />
-          ) : (
-            <RefreshCw className={`w-3.5 h-3.5 text-blue-400 ${isSyncing ? 'animate-spin' : ''}`} />
-          )}
-          <span>{syncBannerMessage}</span>
-        </div>
-      )}
-
-      {/* Floating Offline Pill if offline */}
+      {/* Floating Offline Pill only if offline */}
       {!isOnline && (
         <div className="fixed bottom-20 left-4 z-40 flex items-center gap-2 rounded-full bg-amber-600/95 text-white px-3 py-1.5 text-xs font-semibold shadow-lg backdrop-blur-sm animate-pulse">
           <WifiOff className="w-3.5 h-3.5" />

@@ -58,6 +58,17 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
 
   useEffect(() => {
     loadData();
+    const handleUpdate = () => {
+      loadData();
+    };
+    window.addEventListener('shopledger_inventory_updated', handleUpdate);
+    window.addEventListener('shopledger_sales_updated', handleUpdate);
+    window.addEventListener('shopledger_shop_updated', handleUpdate);
+    return () => {
+      window.removeEventListener('shopledger_inventory_updated', handleUpdate);
+      window.removeEventListener('shopledger_sales_updated', handleUpdate);
+      window.removeEventListener('shopledger_shop_updated', handleUpdate);
+    };
   }, [currentShop]);
 
   // Date filtering

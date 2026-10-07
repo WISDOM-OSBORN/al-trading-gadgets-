@@ -9,7 +9,6 @@ import { SyncProvider } from './context/SyncContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { Header } from './components/common/Header';
 import { BottomNav, ScreenId } from './components/common/BottomNav';
-import { OfflineBanner } from './components/common/OfflineBanner';
 import { Clock } from 'lucide-react';
 
 // Screens
@@ -93,9 +92,6 @@ function MainApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col antialiased">
-      {/* Offline Toast Banner & Indicator */}
-      <OfflineBanner />
-
       {/* End-of-Day Closing Banner Notification */}
       {showClosingAlert && (
         <div className="bg-indigo-600 text-white px-3 py-2 text-xs font-semibold flex items-center justify-between gap-2 shadow-sm animate-in slide-in-from-top">

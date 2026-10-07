@@ -35,6 +35,13 @@ export const SalesHistoryScreen: React.FC = () => {
 
   useEffect(() => {
     loadSales();
+    const handleUpdate = () => {
+      loadSales();
+    };
+    window.addEventListener('shopledger_sales_updated', handleUpdate);
+    return () => {
+      window.removeEventListener('shopledger_sales_updated', handleUpdate);
+    };
   }, [currentShop]);
 
   const filteredSales = useMemo(() => {

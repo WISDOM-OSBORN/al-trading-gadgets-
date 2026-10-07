@@ -1,13 +1,21 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, Shop, UserRole } from '../types';
 import { db, initializeDatabase, syncUsersFromFirestore } from '../db';
-import { pullInventoryFromFirestore } from '../db/sync';
 import {
+  pullInventoryFromFirestore,
+  pullShopFromFirestore,
+  subscribeToCloudShop,
+  subscribeToCloudUsers,
+} from '../db/sync';
+import {
+  firestore,
+  sanitizeForFirestore,
   signInWithGooglePopup,
   authenticateRegisteredUser,
   authenticateWorkerWithEmailAndPin,
   signOutFirebase,
 } from '../db/firebase';
+import { doc, setDoc } from 'firebase/firestore';
 import { verifyPin } from '../utils/crypto';
 
 interface AuthContextType {
@@ -71,8 +79,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Sync remote user list in background without blocking screen render
         syncUsersFromFirestore().catch(() => {});
 
-        // Sync latest inventory from cloud in background
+        // Sync latest shop profile & inventory from cloud in background
         if (shop) {
+          pullShopFromFirestore(shop.id).then((freshShop) => {
+            if (freshShop) setCurrentShop(freshShop);
+          }).catch(() => {});
           pullInventoryFromFirestore(shop.id).catch(() => {});
         }
       } catch (err) {
@@ -82,6 +93,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
     loadAuth();
+  }, []);
+
+  // Real-time synchronization for shop settings & user accounts across all devices
+  useEffect(() => {
+    let unsubUsers: (() => void) | undefined;
+    let unsubShop: (() => void) | undefined;
+
+    async function setupRealtimeSync() {
+      const shop = await db.shops.toCollection().first();
+      const shopId = shop?.id || 'shop-electrical-01';
+
+      unsubUsers = subscribeToCloudUsers();
+      unsubShop = subscribeToCloudShop(shopId, (freshShop) => {
+        if (freshShop) setCurrentShop(freshShop);
+      });
+    }
+
+    setupRealtimeSync();
+
+    const handleShopUpdate = (e: any) => {
+      if (e.detail) setCurrentShop(e.detail);
+    };
+    window.addEventListener('shopledger_shop_updated', handleShopUpdate);
+
+    return () => {
+      unsubUsers?.();
+      unsubShop?.();
+      window.removeEventListener('shopledger_shop_updated', handleShopUpdate);
+    };
   }, []);
 
   // Idle lock timer (10 minutes of inactivity)
@@ -239,18 +279,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const updateShopSettings = async (settings: Partial<Shop['settings']>) => {
     if (!currentShop) return;
     const updatedSettings = { ...currentShop.settings, ...settings };
-    await db.shops.update(currentShop.id, {
-      settings: updatedSettings,
-    });
-    setCurrentShop((prev) => (prev ? { ...prev, settings: updatedSettings } : null));
+    const updatedShop: Shop = { ...currentShop, settings: updatedSettings };
+    await db.shops.put(updatedShop);
+    setCurrentShop(updatedShop);
+
+    try {
+      await setDoc(
+        doc(firestore, 'shops', currentShop.id),
+        sanitizeForFirestore(updatedShop),
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn('Firestore shop settings update notice:', err);
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shopledger_shop_updated', { detail: updatedShop }));
+    }
   };
 
   const updateShopDetails = async (details: Partial<Shop>) => {
     if (!currentShop) return;
-    await db.shops.update(currentShop.id, {
-      ...details,
-    });
-    setCurrentShop((prev) => (prev ? { ...prev, ...details } : null));
+    const updatedShop: Shop = { ...currentShop, ...details };
+    await db.shops.put(updatedShop);
+    setCurrentShop(updatedShop);
+
+    try {
+      await setDoc(
+        doc(firestore, 'shops', currentShop.id),
+        sanitizeForFirestore(updatedShop),
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn('Firestore shop details update notice:', err);
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shopledger_shop_updated', { detail: updatedShop }));
+    }
   };
 
   const refreshShop = async () => {
