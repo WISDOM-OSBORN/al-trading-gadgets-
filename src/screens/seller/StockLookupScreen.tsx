@@ -18,6 +18,14 @@ export const StockLookupScreen: React.FC = () => {
       setItems(all.filter((i) => !i.archived));
     }
     fetchItems();
+
+    const handleUpdate = () => {
+      fetchItems();
+    };
+    window.addEventListener('shopledger_inventory_updated', handleUpdate);
+    return () => {
+      window.removeEventListener('shopledger_inventory_updated', handleUpdate);
+    };
   }, [currentShop]);
 
   const filtered = useMemo(() => {

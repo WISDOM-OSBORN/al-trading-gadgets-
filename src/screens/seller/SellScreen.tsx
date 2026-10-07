@@ -63,6 +63,13 @@ export const SellScreen: React.FC = () => {
 
   useEffect(() => {
     loadItems();
+    const handleUpdate = () => {
+      loadItems();
+    };
+    window.addEventListener('shopledger_inventory_updated', handleUpdate);
+    return () => {
+      window.removeEventListener('shopledger_inventory_updated', handleUpdate);
+    };
   }, [currentShop]);
 
   // Focus search input on mount

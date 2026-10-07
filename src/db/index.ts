@@ -551,6 +551,7 @@ export async function recordOwnerWithdrawal(params: {
 
 // Purge dummy/sample inventory, sales, and dummy accounts for clean production
 export async function purgeDummyData(): Promise<void> {
+  const purgeTimestamp = Date.now();
   await db.transaction('rw', [
     db.items,
     db.sales,
@@ -580,6 +581,52 @@ export async function purgeDummyData(): Promise<void> {
       }
     }
   });
+
+  localStorage.setItem('shopledger_last_purged_at', purgeTimestamp.toString());
+
+  // Also purge from Cloud Firestore so all other devices wipe dummy records
+  try {
+    // 1. Delete all items from Firestore
+    const itemsSnap = await getDocs(collection(firestore, 'items'));
+    for (const d of itemsSnap.docs) {
+      try {
+        await deleteDoc(d.ref);
+      } catch {}
+    }
+
+    // 2. Delete all sales from Firestore
+    const salesSnap = await getDocs(collection(firestore, 'sales'));
+    for (const d of salesSnap.docs) {
+      try {
+        await deleteDoc(d.ref);
+      } catch {}
+    }
+
+    // 3. Delete all imports from Firestore
+    const importsSnap = await getDocs(collection(firestore, 'imports'));
+    for (const d of importsSnap.docs) {
+      try {
+        await deleteDoc(d.ref);
+      } catch {}
+    }
+
+    // 4. Update shop document in Firestore with purge timestamp
+    const shopRef = doc(firestore, 'shops', 'shop-electrical-01');
+    await setDoc(
+      shopRef,
+      {
+        lastInventoryPurgedAt: purgeTimestamp,
+        lastInventoryUpdated: purgeTimestamp,
+      },
+      { merge: true }
+    );
+  } catch (cloudErr) {
+    console.warn('Notice during Firestore cloud purge:', cloudErr);
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+  }
 }
 
 // Reset database utility

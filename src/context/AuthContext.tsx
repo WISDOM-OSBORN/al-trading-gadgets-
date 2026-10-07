@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, Shop, UserRole } from '../types';
 import { db, initializeDatabase, syncUsersFromFirestore } from '../db';
+import { pullInventoryFromFirestore } from '../db/sync';
 import {
   signInWithGooglePopup,
   authenticateRegisteredUser,
@@ -69,6 +70,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         // Sync remote user list in background without blocking screen render
         syncUsersFromFirestore().catch(() => {});
+
+        // Sync latest inventory from cloud in background
+        if (shop) {
+          pullInventoryFromFirestore(shop.id).catch(() => {});
+        }
       } catch (err) {
         console.error('Failed to initialize auth:', err);
       } finally {
@@ -118,6 +124,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setCurrentUser(authRes.user);
       localStorage.setItem('shopledger_active_uid', authRes.user.uid);
       setIsLocked(false);
+
+      const shop = currentShop || await db.shops.toCollection().first();
+      if (shop) {
+        pullInventoryFromFirestore(shop.id).catch(() => {});
+      }
+
       return { success: true };
     } catch (err: any) {
       console.warn('Google sign-in popup issue:', err);
@@ -137,6 +149,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setCurrentUser(authRes.user);
       localStorage.setItem('shopledger_active_uid', authRes.user.uid);
       setIsLocked(false);
+
+      const shop = currentShop || await db.shops.toCollection().first();
+      if (shop) {
+        pullInventoryFromFirestore(shop.id).catch(() => {});
+      }
+
       return { success: true };
     } catch (err: any) {
       console.error('Failed to authenticate Gmail user:', err);
@@ -162,6 +180,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setCurrentUser(authRes.user);
       localStorage.setItem('shopledger_active_uid', authRes.user.uid);
       setIsLocked(false);
+
+      const shop = currentShop || await db.shops.toCollection().first();
+      if (shop) {
+        pullInventoryFromFirestore(shop.id).catch(() => {});
+      }
+
       return { success: true };
     } catch (err: any) {
       console.error('Failed to authenticate with Email and PIN:', err);

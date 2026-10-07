@@ -1,7 +1,19 @@
 import { db } from './index';
 import { firestore, sanitizeForFirestore } from './firebase';
-import { doc, setDoc, writeBatch } from 'firebase/firestore';
 import {
+  doc,
+  setDoc,
+  getDoc,
+  getDocs,
+  deleteDoc,
+  writeBatch,
+  collection,
+  query,
+  where,
+  onSnapshot,
+} from 'firebase/firestore';
+import {
+  Item,
   Sale,
   SaleLineItem,
   SalePayment,
@@ -429,7 +441,11 @@ export async function processSyncQueue(): Promise<{ synced: number; remaining: n
         await setDoc(doc(firestore, 'sales', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
         await db.sales.update(item.payload.id, { syncedAt: Date.now() });
       } else if (item.entity === 'item' && item.payload?.id) {
-        await setDoc(doc(firestore, 'items', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
+        if (item.action === 'delete') {
+          await deleteDoc(doc(firestore, 'items', item.payload.id));
+        } else {
+          await setDoc(doc(firestore, 'items', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
+        }
       } else if (item.entity === 'withdrawal' && item.payload?.id) {
         await setDoc(doc(firestore, 'withdrawals', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
       } else if (item.entity === 'import' && item.payload?.id) {
@@ -454,9 +470,10 @@ export async function processSyncQueue(): Promise<{ synced: number; remaining: n
   return { synced: syncedCount, remaining };
 }
 
-// Bulk sync all shop items and import records to Firestore
+// Bulk sync all shop items and import records to Firestore (with optional catalog reconciliation)
 export async function syncAllInventoryToFirestore(
-  shopId: string
+  shopId: string,
+  replaceCatalog = false
 ): Promise<{ count: number; error?: string }> {
   if (!navigator.onLine) {
     return { count: 0, error: 'Device is offline' };
@@ -464,6 +481,22 @@ export async function syncAllInventoryToFirestore(
 
   try {
     const allItems = await db.items.where('shopId').equals(shopId).toArray();
+    const localItemIds = new Set(allItems.map((i) => i.id));
+
+    // If replaceCatalog is true (e.g. after CSV import or manual sync), prune any old items from Firestore
+    if (replaceCatalog) {
+      try {
+        const snap = await getDocs(collection(firestore, 'items'));
+        for (const docSnap of snap.docs) {
+          if (!localItemIds.has(docSnap.id)) {
+            await deleteDoc(docSnap.ref);
+          }
+        }
+      } catch (err) {
+        console.warn('Notice pruning old Firestore items:', err);
+      }
+    }
+
     if (allItems.length > 0) {
       const batchSize = 400;
       for (let i = 0; i < allItems.length; i += batchSize) {
@@ -476,6 +509,12 @@ export async function syncAllInventoryToFirestore(
       }
     }
 
+    // Touch shop doc in Firestore so other devices detect the new catalog update
+    try {
+      const shopRef = doc(firestore, 'shops', shopId || 'shop-electrical-01');
+      await setDoc(shopRef, { lastInventoryUpdated: Date.now() }, { merge: true });
+    } catch {}
+
     const allImports = await db.imports.where('shopId').equals(shopId).toArray();
     for (const imp of allImports) {
       await setDoc(doc(firestore, 'imports', imp.id), sanitizeForFirestore(imp), { merge: true });
@@ -486,9 +525,257 @@ export async function syncAllInventoryToFirestore(
       await setDoc(doc(firestore, 'withdrawals', w.id), sanitizeForFirestore(w), { merge: true });
     }
 
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+    }
+
     return { count: allItems.length };
   } catch (err: any) {
     console.warn('Firestore sync notice (offline mode active):', err?.message || err);
     return { count: 0, error: err?.message || 'Sync error' };
+  }
+}
+
+// Pull latest inventory from Cloud Firestore into local Dexie
+export async function pullInventoryFromFirestore(shopId: string): Promise<{ pulled: number; removed: number }> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { pulled: 0, removed: 0 };
+  }
+
+  try {
+    const targetShopId = shopId || 'shop-electrical-01';
+
+    // 1. Check shop document for cloud purge commands
+    try {
+      const shopSnap = await getDoc(doc(firestore, 'shops', targetShopId));
+      if (shopSnap.exists()) {
+        const shopData = shopSnap.data();
+        const cloudPurgedAt = shopData?.lastInventoryPurgedAt || 0;
+        const localPurgedAt = parseInt(localStorage.getItem('shopledger_last_purged_at') || '0', 10);
+        if (cloudPurgedAt > localPurgedAt) {
+          // Cloud purge was performed by owner! Clear local dummy/stale records
+          await db.items.clear();
+          await db.sales.clear();
+          await db.stockMovements.clear();
+          await db.imports.clear();
+          localStorage.setItem('shopledger_last_purged_at', cloudPurgedAt.toString());
+        }
+      }
+    } catch (checkErr) {
+      console.warn('Could not check purge status:', checkErr);
+    }
+
+    // 2. Fetch all items from Firestore
+    const itemsCol = collection(firestore, 'items');
+    let snap = await getDocs(query(itemsCol, where('shopId', '==', targetShopId)));
+    if (snap.empty) {
+      snap = await getDocs(itemsCol);
+    }
+
+    if (snap.empty) {
+      return { pulled: 0, removed: 0 };
+    }
+
+    const cloudItems: Item[] = [];
+    const cloudItemIds = new Set<string>();
+
+    for (const d of snap.docs) {
+      const data = d.data() as Item;
+      if (data && data.name) {
+        const itemObj: Item = {
+          ...data,
+          id: d.id,
+          shopId: data.shopId || targetShopId,
+          costPrice: Number(data.costPrice) || 0,
+          sellingPrice: Number(data.sellingPrice) || 0,
+          quantity: Number(data.quantity) || 0,
+          archived: Boolean(data.archived),
+        };
+        cloudItems.push(itemObj);
+        cloudItemIds.add(d.id);
+      }
+    }
+
+    if (cloudItems.length > 0) {
+      await db.items.bulkPut(cloudItems);
+    }
+
+    // 3. Remove local items that were deleted in Cloud Firestore
+    let removedCount = 0;
+    const localItems = await db.items.toArray();
+    for (const loc of localItems) {
+      if (!cloudItemIds.has(loc.id)) {
+        await db.items.delete(loc.id);
+        removedCount++;
+      }
+    }
+
+    // Notify UI components
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+    }
+
+    return { pulled: cloudItems.length, removed: removedCount };
+  } catch (err) {
+    console.warn('Pull inventory notice (offline fallback active):', err);
+    return { pulled: 0, removed: 0 };
+  }
+}
+
+// Real-time listener for Firestore items so all connected seller devices update immediately
+export function subscribeToCloudInventory(shopId: string, onChange?: () => void): () => void {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return () => {};
+  }
+
+  try {
+    const targetShopId = shopId || 'shop-electrical-01';
+    const itemsCol = collection(firestore, 'items');
+    const unsub = onSnapshot(
+      itemsCol,
+      async (snap) => {
+        try {
+          if (snap.empty) return;
+          const cloudItems: Item[] = [];
+          const cloudIds = new Set<string>();
+          for (const d of snap.docs) {
+            const data = d.data() as Item;
+            if (data && data.name) {
+              cloudItems.push({
+                ...data,
+                id: d.id,
+                shopId: data.shopId || targetShopId,
+                costPrice: Number(data.costPrice) || 0,
+                sellingPrice: Number(data.sellingPrice) || 0,
+                quantity: Number(data.quantity) || 0,
+                archived: Boolean(data.archived),
+              });
+              cloudIds.add(d.id);
+            }
+          }
+
+          if (cloudItems.length > 0) {
+            await db.items.bulkPut(cloudItems);
+          }
+
+          // Clean local items not in cloud
+          const localItems = await db.items.toArray();
+          for (const loc of localItems) {
+            if (!cloudIds.has(loc.id)) {
+              await db.items.delete(loc.id);
+            }
+          }
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+          }
+          onChange?.();
+        } catch (inner) {
+          console.warn('Real-time inventory sync processing error:', inner);
+        }
+      },
+      (error) => {
+        console.warn('Real-time inventory listener notice:', error);
+      }
+    );
+    return unsub;
+  } catch {
+    return () => {};
+  }
+}
+
+// Save or update an item across Dexie and Cloud Firestore
+export async function saveItemAcrossDevices(item: Item): Promise<void> {
+  const now = Date.now();
+  const cleanItem: Item = {
+    ...item,
+    updatedAt: now,
+  };
+  await db.items.put(cleanItem);
+
+  if (navigator.onLine) {
+    try {
+      await setDoc(doc(firestore, 'items', cleanItem.id), sanitizeForFirestore(cleanItem), { merge: true });
+    } catch (err) {
+      console.warn('Immediate Firestore item save failed, queued for sync:', err);
+      await db.syncQueue.add({
+        id: `sync-item-${cleanItem.id}-${now}`,
+        entity: 'item',
+        action: 'update',
+        payload: cleanItem,
+        attempts: 0,
+        status: 'pending',
+        createdAt: now,
+      });
+    }
+  } else {
+    await db.syncQueue.add({
+      id: `sync-item-${cleanItem.id}-${now}`,
+      entity: 'item',
+      action: 'update',
+      payload: cleanItem,
+      attempts: 0,
+      status: 'pending',
+      createdAt: now,
+    });
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+  }
+}
+
+// Delete an item across Dexie and Cloud Firestore
+export async function deleteItemAcrossDevices(
+  shopId: string,
+  itemId: string,
+  userId: string,
+  userName: string
+): Promise<void> {
+  const now = Date.now();
+  const existing = await db.items.get(itemId);
+  await db.items.delete(itemId);
+
+  await db.auditLogs.add({
+    id: `audit-${now}-${Math.random().toString(36).substring(2, 7)}`,
+    shopId,
+    action: 'item_deleted',
+    entity: 'items',
+    entityId: itemId,
+    userId,
+    userName,
+    meta: { name: existing?.name || itemId, sku: existing?.sku },
+    createdAt: now,
+  });
+
+  if (navigator.onLine) {
+    try {
+      await deleteDoc(doc(firestore, 'items', itemId));
+    } catch (err) {
+      console.warn('Immediate Firestore delete failed, queued for sync:', err);
+      await db.syncQueue.add({
+        id: `sync-del-item-${itemId}-${now}`,
+        entity: 'item',
+        action: 'delete',
+        payload: { id: itemId },
+        attempts: 0,
+        status: 'pending',
+        createdAt: now,
+      });
+    }
+  } else {
+    await db.syncQueue.add({
+      id: `sync-del-item-${itemId}-${now}`,
+      entity: 'item',
+      action: 'delete',
+      payload: { id: itemId },
+      attempts: 0,
+      status: 'pending',
+      createdAt: now,
+    });
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
   }
 }

@@ -2,7 +2,11 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Item, StockMovementType, OwnerWithdrawal } from '../../types';
 import { db, recordOwnerWithdrawal } from '../../db';
-import { adjustStock } from '../../db/sync';
+import {
+  adjustStock,
+  saveItemAcrossDevices,
+  deleteItemAcrossDevices,
+} from '../../db/sync';
 import { exportInventoryToCSV, downloadCSV } from '../../utils/csv';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
@@ -21,6 +25,7 @@ import {
   PackageMinus,
   History,
   FileSpreadsheet,
+  Trash2,
 } from 'lucide-react';
 
 interface InventoryScreenProps {
@@ -73,6 +78,14 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
   useEffect(() => {
     loadItems();
     loadWithdrawals();
+
+    const handleUpdate = () => {
+      loadItems();
+    };
+    window.addEventListener('shopledger_inventory_updated', handleUpdate);
+    return () => {
+      window.removeEventListener('shopledger_inventory_updated', handleUpdate);
+    };
   }, [currentShop]);
 
   const filteredItems = useMemo(() => {
@@ -108,7 +121,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
 
     if (editingItem.id) {
       // Update
-      await db.items.update(editingItem.id, {
+      const updatedItem: Item = {
+        ...editingItem,
+        id: editingItem.id,
+        shopId: currentShop.id,
         name: editingItem.name.trim(),
         sku,
         barcode: editingItem.barcode?.trim() || undefined,
@@ -120,8 +136,12 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
         reorderLevel: Number(editingItem.reorderLevel) || 5,
         supplier: editingItem.supplier?.trim() || undefined,
         description: editingItem.description?.trim() || undefined,
+        archived: Boolean(editingItem.archived),
+        createdAt: editingItem.createdAt || now,
         updatedAt: now,
-      });
+      };
+
+      await saveItemAcrossDevices(updatedItem);
 
       await db.auditLogs.add({
         id: `audit-${now}`,
@@ -156,7 +176,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
         updatedAt: now,
       };
 
-      await db.items.add(newItem);
+      await saveItemAcrossDevices(newItem);
 
       // Record initial movement
       if (newItem.quantity > 0) {
@@ -195,11 +215,12 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
     await loadItems();
   };
 
-  // Toggle archive
+  // Toggle archive across devices
   const handleToggleArchive = async (item: Item) => {
     if (!currentShop) return;
     const now = Date.now();
-    await db.items.update(item.id, {
+    await saveItemAcrossDevices({
+      ...item,
       archived: !item.archived,
       updatedAt: now,
     });
@@ -214,6 +235,27 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
       meta: { name: item.name },
       createdAt: now,
     });
+    await loadItems();
+  };
+
+  // Permanently delete item across all devices & cloud
+  const handleDeleteItem = async (item: Item) => {
+    if (!currentShop || !currentUser) return;
+    if (
+      !confirm(
+        `Are you sure you want to permanently delete "${item.name}" (SKU: ${item.sku})? This will remove it across all devices and cloud inventory.`
+      )
+    ) {
+      return;
+    }
+    await deleteItemAcrossDevices(
+      currentShop.id,
+      item.id,
+      currentUser.uid,
+      currentUser.name
+    );
+    setIsEditModalOpen(false);
+    setEditingItem(null);
     await loadItems();
   };
 
@@ -558,10 +600,19 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                               {/* Archive Item */}
                               <button
                                 onClick={() => handleToggleArchive(item)}
-                                className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-rose-500 transition cursor-pointer"
-                                title="Archive Gadget"
+                                className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-amber-500 transition cursor-pointer"
+                                title={item.archived ? 'Restore Gadget' : 'Archive Gadget'}
                               >
                                 <Archive className="w-3.5 h-3.5" />
+                              </button>
+
+                              {/* Delete Item permanently across all devices */}
+                              <button
+                                onClick={() => handleDeleteItem(item)}
+                                className="p-1.5 rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-400 transition cursor-pointer"
+                                title="Permanently Delete Item across all devices"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </div>
                           </td>
@@ -1102,20 +1153,36 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                 />
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setIsEditModalOpen(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-700 cursor-pointer shadow-sm"
-                >
-                  Save Gadget
-                </button>
+              <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                {editingItem.id ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteItem(editingItem as Item)}
+                    className="px-3.5 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-600 dark:text-rose-400 font-semibold hover:bg-rose-100 dark:hover:bg-rose-900/40 flex items-center gap-1.5 cursor-pointer text-xs"
+                    title="Permanently Delete Item across all devices"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>Delete Item</span>
+                  </button>
+                ) : (
+                  <div />
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditModalOpen(false)}
+                    className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold text-xs"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-700 cursor-pointer shadow-sm text-xs"
+                  >
+                    Save Gadget
+                  </button>
+                </div>
               </div>
             </form>
           </div>

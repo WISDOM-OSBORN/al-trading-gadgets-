@@ -187,6 +187,7 @@ export type AuditAction =
   | 'stock_adjusted' 
   | 'item_created' 
   | 'item_updated' 
+  | 'item_deleted'
   | 'item_archived' 
   | 'item_restored' 
   | 'inventory_imported' 

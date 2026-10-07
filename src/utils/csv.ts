@@ -404,7 +404,7 @@ export async function executeBatchImport(params: {
 
   // Automatically sync newly imported items and import record to Firebase Firestore
   try {
-    await syncAllInventoryToFirestore(shopId);
+    await syncAllInventoryToFirestore(shopId, true);
   } catch (syncErr) {
     console.warn('Background sync to Firestore scheduled:', syncErr);
   }

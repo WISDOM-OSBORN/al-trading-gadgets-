@@ -1,6 +1,11 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { db } from '../db';
-import { processSyncQueue, syncAllInventoryToFirestore } from '../db/sync';
+import {
+  processSyncQueue,
+  syncAllInventoryToFirestore,
+  pullInventoryFromFirestore,
+  subscribeToCloudInventory,
+} from '../db/sync';
 
 interface SyncContextType {
   isOnline: boolean;
@@ -48,11 +53,22 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSyncBannerMessage(`Syncing ${pendingCount} pending change${pendingCount > 1 ? 's' : ''}...`);
       }
 
-      // Fast queue processing (only sends pending sales, stock updates, voids)
+      // 1. Process pending local queue (send sales, edits, voids)
       const result = await processSyncQueue();
 
-      if (result.synced > 0) {
-        setSyncBannerMessage(`All synced (${result.synced} item${result.synced > 1 ? 's' : ''})`);
+      // 2. Pull latest Cloud Firestore inventory so all devices match
+      const shop = await db.shops.toCollection().first();
+      let pulledCount = 0;
+      if (shop) {
+        const pullRes = await pullInventoryFromFirestore(shop.id);
+        pulledCount = pullRes.pulled;
+      }
+
+      if (result.synced > 0 || pulledCount > 0) {
+        const parts: string[] = [];
+        if (result.synced > 0) parts.push(`${result.synced} change${result.synced > 1 ? 's' : ''} saved`);
+        if (pulledCount > 0) parts.push(`${pulledCount} items synced`);
+        setSyncBannerMessage(`Cloud synced (${parts.join(', ')})`);
         setLastSyncedTime(Date.now());
         setTimeout(() => setSyncBannerMessage(null), 3000);
       } else {
@@ -74,13 +90,14 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!effectiveOnline || isSyncing) return;
     try {
       setIsSyncing(true);
-      setSyncBannerMessage('Syncing full inventory catalog to cloud...');
+      setSyncBannerMessage('Reconciling full inventory catalog with cloud...');
       const shop = await db.shops.toCollection().first();
       if (shop) {
-        await syncAllInventoryToFirestore(shop.id);
+        await syncAllInventoryToFirestore(shop.id, true);
+        await pullInventoryFromFirestore(shop.id);
       }
       await processSyncQueue();
-      setSyncBannerMessage('Full inventory catalog synced to Cloud.');
+      setSyncBannerMessage('Full inventory catalog synchronized across all devices.');
       setLastSyncedTime(Date.now());
       setTimeout(() => setSyncBannerMessage(null), 3500);
       await refreshPendingCount();
@@ -90,6 +107,25 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsSyncing(false);
     }
   }, [effectiveOnline, isSyncing, refreshPendingCount]);
+
+  // Real-time listener for Cloud Firestore inventory updates
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    async function initListener() {
+      const shop = await db.shops.toCollection().first();
+      if (shop && effectiveOnline) {
+        // Initial non-blocking pull
+        pullInventoryFromFirestore(shop.id).catch(() => {});
+        // Real-time Firestore subscription
+        unsub = subscribeToCloudInventory(shop.id);
+      }
+    }
+    initListener();
+
+    return () => {
+      unsub?.();
+    };
+  }, [effectiveOnline]);
 
   // Online / offline event listeners
   useEffect(() => {
