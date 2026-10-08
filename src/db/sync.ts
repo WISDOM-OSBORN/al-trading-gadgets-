@@ -711,11 +711,13 @@ export async function pullInventoryFromFirestore(shopId: string): Promise<{ pull
       await db.items.bulkPut(cloudItems);
     }
 
-    // 3. Remove local items that were deleted in Cloud Firestore
+    // 3. Remove local items that were deleted in Cloud Firestore (skipping pending local items)
     let removedCount = 0;
     const localItems = await db.items.toArray();
+    const pendingQueueItems = await db.syncQueue.where('entity').equals('item').toArray();
+    const pendingIds = new Set(pendingQueueItems.map((q) => q.payload?.id).filter(Boolean));
     for (const loc of localItems) {
-      if (!cloudItemIds.has(loc.id)) {
+      if (!cloudItemIds.has(loc.id) && !pendingIds.has(loc.id)) {
         await db.items.delete(loc.id);
         removedCount++;
       }
@@ -747,11 +749,6 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
       async (snap) => {
         try {
           if (snap.empty) {
-            await db.items.clear();
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
-            }
-            onChange?.();
             return;
           }
 
@@ -786,11 +783,13 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
             await db.items.bulkPut(cloudItems);
           }
 
-          // Clean local items not in cloud only if cloud has verified catalog items
+          // Clean local items not in cloud only if cloud has verified catalog items and not pending in queue
           if (cloudIds.size > 0) {
             const localItems = await db.items.toArray();
+            const pendingQueueItems = await db.syncQueue.where('entity').equals('item').toArray();
+            const pendingIds = new Set(pendingQueueItems.map((q) => q.payload?.id).filter(Boolean));
             for (const loc of localItems) {
-              if (!cloudIds.has(loc.id)) {
+              if (!cloudIds.has(loc.id) && !pendingIds.has(loc.id)) {
                 await db.items.delete(loc.id);
               }
             }
@@ -846,25 +845,6 @@ export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]
           }
 
           if (cloudSales.length > 0) {
-            // Check if any sale is newly marked as voided compared to local state, restore stock locally if needed
-            for (const cs of cloudSales) {
-              if (cs.status === 'voided') {
-                const localSale = await db.sales.get(cs.id);
-                // If local sale was completed and has now been voided from owner or seller on another device
-                if (localSale && localSale.status === 'completed') {
-                  for (const line of cs.lines) {
-                    const localItem = await db.items.get(line.itemId);
-                    if (localItem) {
-                      await db.items.update(line.itemId, {
-                        quantity: localItem.quantity + line.qty,
-                        updatedAt: Date.now(),
-                      });
-                    }
-                  }
-                }
-              }
-            }
-
             await db.sales.bulkPut(cloudSales);
           }
 
@@ -914,24 +894,6 @@ export async function pullSalesFromFirestore(shopId?: string): Promise<{ pulled:
     }
 
     if (cloudSales.length > 0) {
-      // Check if any pulled sale is voided where local was completed
-      for (const cs of cloudSales) {
-        if (cs.status === 'voided') {
-          const localSale = await db.sales.get(cs.id);
-          if (localSale && localSale.status === 'completed') {
-            for (const line of cs.lines) {
-              const localItem = await db.items.get(line.itemId);
-              if (localItem) {
-                await db.items.update(line.itemId, {
-                  quantity: localItem.quantity + line.qty,
-                  updatedAt: Date.now(),
-                });
-              }
-            }
-          }
-        }
-      }
-
       await db.sales.bulkPut(cloudSales);
     }
 

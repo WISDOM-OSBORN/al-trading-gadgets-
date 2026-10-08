@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Item, Sale } from '../../types';
 import { db } from '../../db';
-import { recordSale, voidSale } from '../../db/sync';
+import { recordSale } from '../../db/sync';
 import { formatCurrency, formatTime, formatDateTime } from '../../utils/formatters';
 import {
   Search,
@@ -15,7 +15,6 @@ import {
   Boxes,
   Sparkles,
   X,
-  RotateCcw,
 } from 'lucide-react';
 
 export const SellScreen: React.FC = () => {
@@ -31,11 +30,6 @@ export const SellScreen: React.FC = () => {
   const [sellQuantity, setSellQuantity] = useState<number | ''>(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  // Void Modal State
-  const [voidingSale, setVoidingSale] = useState<Sale | null>(null);
-  const [voidReason, setVoidReason] = useState('');
-  const [isSubmittingVoid, setIsSubmittingVoid] = useState(false);
 
   // Recent Recorded Sale Notification (with system invoice #, time, remaining stock)
   const [lastRecordedSale, setLastRecordedSale] = useState<{
@@ -198,26 +192,6 @@ export const SellScreen: React.FC = () => {
       setErrorMessage(err?.message || 'Failed to record sale.');
     } finally {
       setIsSubmitting(false);
-    }
-  };
-
-  // Execute Void Sale and restore stock count across seller and owner
-  const handleExecuteVoid = async () => {
-    if (!voidingSale || !voidReason.trim() || !currentUser) return;
-    try {
-      setIsSubmittingVoid(true);
-      await voidSale(voidingSale.id, voidReason.trim(), currentUser.uid, currentUser.name);
-
-      if (lastRecordedSale?.invoiceNo === voidingSale.invoiceNo) {
-        setLastRecordedSale(null);
-      }
-      setVoidingSale(null);
-      setVoidReason('');
-      await loadItems();
-    } catch (err: any) {
-      alert(`Failed to void sale: ${err.message}`);
-    } finally {
-      setIsSubmittingVoid(false);
     }
   };
 
@@ -592,31 +566,14 @@ export const SellScreen: React.FC = () => {
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        <div className="text-right">
-                          <span
-                            className={`font-bold text-xs sm:text-sm ${
-                              isVoided ? 'line-through text-slate-400' : 'text-slate-900 dark:text-white'
-                            }`}
-                          >
-                            {formatCurrency(sale.total, currentShop?.currency)}
-                          </span>
-                        </div>
-
-                        {!isVoided && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setVoidingSale(sale);
-                              setVoidReason('');
-                            }}
-                            className="p-1.5 rounded-lg border border-rose-200 dark:border-rose-900/60 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition cursor-pointer"
-                            title="Void this sale and restore stock"
-                            aria-label="Void sale"
-                          >
-                            <RotateCcw className="w-3.5 h-3.5" />
-                          </button>
-                        )}
+                      <div className="text-right shrink-0">
+                        <span
+                          className={`font-bold text-xs sm:text-sm ${
+                            isVoided ? 'line-through text-slate-400' : 'text-slate-900 dark:text-white'
+                          }`}
+                        >
+                          {formatCurrency(sale.total, currentShop?.currency)}
+                        </span>
                       </div>
                     </div>
                   );
@@ -626,87 +583,6 @@ export const SellScreen: React.FC = () => {
           </div>
         </div>
       </div>
-
-      {/* Quick Void Sale Modal */}
-      {voidingSale && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 p-5 shadow-2xl border border-slate-200 dark:border-slate-800 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center gap-2 text-rose-600 mb-2">
-              <AlertTriangle className="w-5 h-5 shrink-0" />
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white">
-                Void Invoice {voidingSale.invoiceNo}
-              </h3>
-            </div>
-            <p className="text-xs text-slate-600 dark:text-slate-400 mb-3 leading-relaxed">
-              Voiding this sale will restore{' '}
-              <strong className="text-slate-900 dark:text-white">
-                {voidingSale.lines.reduce((s, l) => s + l.qty, 0)} item(s)
-              </strong>{' '}
-              back to the inventory ledger immediately across all devices (both seller and owner).
-            </p>
-
-            {/* Quick Reason Chips */}
-            <div className="mb-3 space-y-1.5">
-              <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-                Common reasons:
-              </span>
-              <div className="flex flex-wrap gap-1">
-                {['Customer returned item', 'Wrong item/qty entered', 'Transaction cancelled'].map(
-                  (chip) => (
-                    <button
-                      key={chip}
-                      type="button"
-                      onClick={() => setVoidReason(chip)}
-                      className={`text-[10px] px-2 py-0.5 rounded-md border cursor-pointer transition ${
-                        voidReason === chip
-                          ? 'bg-rose-600 text-white border-rose-600 font-semibold'
-                          : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100'
-                      }`}
-                    >
-                      {chip}
-                    </button>
-                  )
-                )}
-              </div>
-            </div>
-
-            <div className="space-y-1.5 mb-4">
-              <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                Reason for Voiding:
-              </label>
-              <textarea
-                value={voidReason}
-                onChange={(e) => setVoidReason(e.target.value)}
-                placeholder="State reason for restock..."
-                rows={2}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-rose-500"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setVoidingSale(null);
-                  setVoidReason('');
-                }}
-                disabled={isSubmittingVoid}
-                className="px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleExecuteVoid}
-                disabled={isSubmittingVoid || !voidReason.trim()}
-                className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50 cursor-pointer transition flex items-center gap-1.5 shadow-sm"
-              >
-                {isSubmittingVoid ? 'Restoring Stock...' : 'Confirm Void & Restock'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

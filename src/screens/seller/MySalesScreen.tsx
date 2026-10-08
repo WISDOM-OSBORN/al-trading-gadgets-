@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Sale } from '../../types';
 import { db } from '../../db';
-import { voidSale } from '../../db/sync';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
   Receipt,
@@ -10,8 +9,6 @@ import {
   CheckCircle2,
   Calendar,
   Boxes,
-  RotateCcw,
-  AlertTriangle,
 } from 'lucide-react';
 
 export const MySalesScreen: React.FC = () => {
@@ -20,11 +17,6 @@ export const MySalesScreen: React.FC = () => {
   const [timeFilter, setTimeFilter] = useState<'today' | 'week'>('today');
   const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'voided'>('all');
   const [searchQuery, setSearchQuery] = useState('');
-
-  // Void modal state
-  const [voidingSale, setVoidingSale] = useState<Sale | null>(null);
-  const [voidReason, setVoidReason] = useState('');
-  const [isSubmittingVoid, setIsSubmittingVoid] = useState(false);
 
   const loadSales = async () => {
     if (!currentUser || !currentShop) return;
@@ -62,22 +54,6 @@ export const MySalesScreen: React.FC = () => {
       window.removeEventListener('shopledger_inventory_updated', handleUpdate);
     };
   }, [currentUser, currentShop, timeFilter]);
-
-  // Execute Void Sale from seller side
-  const handleExecuteVoid = async () => {
-    if (!voidingSale || !voidReason.trim() || !currentUser) return;
-    try {
-      setIsSubmittingVoid(true);
-      await voidSale(voidingSale.id, voidReason.trim(), currentUser.uid, currentUser.name);
-      setVoidingSale(null);
-      setVoidReason('');
-      await loadSales();
-    } catch (err: any) {
-      alert(`Failed to void sale: ${err.message}`);
-    } finally {
-      setIsSubmittingVoid(false);
-    }
-  };
 
   const filteredSales = sales.filter((sale) => {
     if (statusFilter === 'completed' && sale.status === 'voided') return false;
@@ -117,7 +93,7 @@ export const MySalesScreen: React.FC = () => {
             <p className="text-xl font-bold">{totalCompletedCount}</p>
             {voidedCount > 0 && (
               <span className="text-[10px] text-rose-200 block font-semibold">
-                {voidedCount} voided ({voidedCount} restocked)
+                {voidedCount} voided by owner (restocked)
               </span>
             )}
           </div>
@@ -229,7 +205,7 @@ export const MySalesScreen: React.FC = () => {
                       </span>
                       {isVoided ? (
                         <span className="px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 text-[10px] font-bold">
-                          VOIDED
+                          VOIDED BY OWNER
                         </span>
                       ) : (
                         <span className="px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 text-[10px] font-semibold flex items-center gap-1">
@@ -252,34 +228,17 @@ export const MySalesScreen: React.FC = () => {
                     )}
                   </div>
 
-                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100 dark:border-slate-800">
-                    <div className="text-left sm:text-right">
-                      <p
-                        className={`font-black text-xs sm:text-sm ${
-                          isVoided ? 'line-through text-slate-400' : 'text-slate-900 dark:text-white'
-                        }`}
-                      >
-                        {formatCurrency(sale.total, currentShop?.currency)}
-                      </p>
-                      <span className="text-[10px] text-slate-400">
-                        {sale.syncedAt ? 'Synced' : 'Saved offline'}
-                      </span>
-                    </div>
-
-                    {!isVoided && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setVoidingSale(sale);
-                          setVoidReason('');
-                        }}
-                        className="px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-900/60 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-50 flex items-center gap-1 cursor-pointer"
-                        title="Void sale and return stock"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                        <span>Void</span>
-                      </button>
-                    )}
+                  <div className="text-left sm:text-right shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100 dark:border-slate-800">
+                    <p
+                      className={`font-black text-xs sm:text-sm ${
+                        isVoided ? 'line-through text-slate-400' : 'text-slate-900 dark:text-white'
+                      }`}
+                    >
+                      {formatCurrency(sale.total, currentShop?.currency)}
+                    </p>
+                    <span className="text-[10px] text-slate-400">
+                      {sale.syncedAt ? 'Synced' : 'Saved offline'}
+                    </span>
                   </div>
                 </div>
               );
@@ -287,86 +246,6 @@ export const MySalesScreen: React.FC = () => {
           </div>
         )}
       </div>
-
-      {/* Void Sale Modal for Seller */}
-      {voidingSale && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 p-5 shadow-2xl border border-slate-200 dark:border-slate-800 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center gap-2 text-rose-600 mb-2">
-              <AlertTriangle className="w-5 h-5 shrink-0" />
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white">
-                Void Invoice {voidingSale.invoiceNo}
-              </h3>
-            </div>
-            <p className="text-xs text-slate-600 dark:text-slate-400 mb-3 leading-relaxed">
-              Voiding this sale will restore{' '}
-              <strong className="text-slate-900 dark:text-white">
-                {voidingSale.lines.reduce((s, l) => s + l.qty, 0)} item(s)
-              </strong>{' '}
-              back into the shop inventory ledger. Both seller and owner screens will reflect this immediately.
-            </p>
-
-            <div className="mb-3 space-y-1.5">
-              <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-                Common reasons:
-              </span>
-              <div className="flex flex-wrap gap-1">
-                {['Customer returned item', 'Wrong item/qty entered', 'Transaction cancelled'].map(
-                  (chip) => (
-                    <button
-                      key={chip}
-                      type="button"
-                      onClick={() => setVoidReason(chip)}
-                      className={`text-[10px] px-2 py-0.5 rounded-md border cursor-pointer transition ${
-                        voidReason === chip
-                          ? 'bg-rose-600 text-white border-rose-600 font-semibold'
-                          : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100'
-                      }`}
-                    >
-                      {chip}
-                    </button>
-                  )
-                )}
-              </div>
-            </div>
-
-            <div className="space-y-1.5 mb-4">
-              <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                Reason for Voiding:
-              </label>
-              <textarea
-                value={voidReason}
-                onChange={(e) => setVoidReason(e.target.value)}
-                placeholder="Why is this sale being voided?"
-                rows={2}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-rose-500"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setVoidingSale(null);
-                  setVoidReason('');
-                }}
-                disabled={isSubmittingVoid}
-                className="px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleExecuteVoid}
-                disabled={isSubmittingVoid || !voidReason.trim()}
-                className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50 cursor-pointer transition flex items-center gap-1.5 shadow-sm"
-              >
-                {isSubmittingVoid ? 'Restoring Stock...' : 'Confirm Void & Restock'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
