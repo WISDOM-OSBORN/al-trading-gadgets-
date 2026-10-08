@@ -225,10 +225,26 @@ export async function recordSale(params: RecordSaleParams): Promise<Sale> {
       action: 'create',
       payload: newSale,
       attempts: 0,
-      status: 'pending',
+      status: navigator.onLine ? 'synced' : 'pending',
       createdAt: now,
     };
     await db.syncQueue.add(syncItem);
+
+    // Enqueue updated item quantities to syncQueue for robust offline/online parity
+    for (const line of lines) {
+      const item = await db.items.get(line.itemId);
+      if (item) {
+        await db.syncQueue.add({
+          id: `sync-item-${item.id}-${now}`,
+          entity: 'item',
+          action: 'update',
+          payload: item,
+          attempts: 0,
+          status: navigator.onLine ? 'synced' : 'pending',
+          createdAt: now,
+        });
+      }
+    }
   });
 
   // 6. Direct real-time write to Firestore if online
@@ -236,15 +252,14 @@ export async function recordSale(params: RecordSaleParams): Promise<Sale> {
     try {
       await setDoc(doc(firestore, 'sales', newSale.id), sanitizeForFirestore(newSale), { merge: true });
       await db.sales.update(newSale.id, { syncedAt: now });
-      await db.syncQueue.update(`sync-${saleId}`, { status: 'synced' });
 
-      // Update item quantities in Firestore
+      // Update full item records with updated quantities in Firestore
       for (const line of lines) {
         const currentItem = await db.items.get(line.itemId);
         if (currentItem) {
           await setDoc(
             doc(firestore, 'items', line.itemId),
-            { quantity: currentItem.quantity, updatedAt: now },
+            sanitizeForFirestore(currentItem),
             { merge: true }
           );
         }
@@ -283,7 +298,7 @@ export async function voidSale(
     if (!sale) throw new Error('Sale not found.');
     if (sale.status === 'voided') throw new Error('Sale is already voided.');
 
-    // 1. Restore stock
+    // 1. Restore stock in local ledger
     for (const line of sale.lines) {
       const item = await db.items.get(line.itemId);
       if (item) {
@@ -312,6 +327,17 @@ export async function voidSale(
           createdAt: now,
         };
         await db.stockMovements.add(movement);
+
+        // Queue item stock restoration for sync
+        await db.syncQueue.add({
+          id: `sync-item-void-${item.id}-${now}`,
+          entity: 'item',
+          action: 'update',
+          payload: { ...item, quantity: newQty, updatedAt: now },
+          attempts: 0,
+          status: navigator.onLine ? 'synced' : 'pending',
+          createdAt: now,
+        });
       }
     }
 
@@ -361,13 +387,13 @@ export async function voidSale(
       action: 'update',
       payload: { id: saleId, status: 'voided', voidReason, voidedAt: now, voidedBy: userName },
       attempts: 0,
-      status: 'pending',
+      status: navigator.onLine ? 'synced' : 'pending',
       createdAt: now,
     };
     await db.syncQueue.add(syncItem);
   });
 
-  // Direct live Firestore write if online
+  // Direct live Firestore write if online: immediately updates Firestore sales & items docs
   if (typeof navigator !== 'undefined' && navigator.onLine) {
     try {
       const sale = await db.sales.get(saleId);
@@ -382,7 +408,7 @@ export async function voidSale(
           if (currentItem) {
             await setDoc(
               doc(firestore, 'items', line.itemId),
-              { quantity: currentItem.quantity, updatedAt: now },
+              sanitizeForFirestore(currentItem),
               { merge: true }
             );
           }
@@ -744,6 +770,15 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
                 archived: Boolean(data.archived),
               });
               cloudIds.add(d.id);
+            } else if (data && data.quantity !== undefined) {
+              const existing = await db.items.get(d.id);
+              if (existing) {
+                await db.items.update(d.id, {
+                  quantity: Number(data.quantity) || 0,
+                  updatedAt: Date.now(),
+                });
+              }
+              cloudIds.add(d.id);
             }
           }
 
@@ -751,11 +786,13 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
             await db.items.bulkPut(cloudItems);
           }
 
-          // Clean local items not in cloud
-          const localItems = await db.items.toArray();
-          for (const loc of localItems) {
-            if (!cloudIds.has(loc.id)) {
-              await db.items.delete(loc.id);
+          // Clean local items not in cloud only if cloud has verified catalog items
+          if (cloudIds.size > 0) {
+            const localItems = await db.items.toArray();
+            for (const loc of localItems) {
+              if (!cloudIds.has(loc.id)) {
+                await db.items.delete(loc.id);
+              }
             }
           }
 
@@ -777,7 +814,7 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
   }
 }
 
-// Real-time listener for Firestore sales so transactions show across all devices
+// Real-time listener for Firestore sales so transactions & void status reflect across all devices simultaneously
 export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]) => void): () => void {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return () => {};
@@ -799,17 +836,41 @@ export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]
                 shopId: data.shopId || shopId || 'shop-electrical-01',
                 subtotal: Number(data.subtotal) || Number(data.total) || 0,
                 total: Number(data.total) || 0,
+                status: data.status || 'completed',
+                voidReason: data.voidReason,
+                voidedAt: data.voidedAt,
+                voidedBy: data.voidedBy,
                 createdAtClient: Number(data.createdAtClient) || Date.now(),
               });
             }
           }
 
           if (cloudSales.length > 0) {
+            // Check if any sale is newly marked as voided compared to local state, restore stock locally if needed
+            for (const cs of cloudSales) {
+              if (cs.status === 'voided') {
+                const localSale = await db.sales.get(cs.id);
+                // If local sale was completed and has now been voided from owner or seller on another device
+                if (localSale && localSale.status === 'completed') {
+                  for (const line of cs.lines) {
+                    const localItem = await db.items.get(line.itemId);
+                    if (localItem) {
+                      await db.items.update(line.itemId, {
+                        quantity: localItem.quantity + line.qty,
+                        updatedAt: Date.now(),
+                      });
+                    }
+                  }
+                }
+              }
+            }
+
             await db.sales.bulkPut(cloudSales);
           }
 
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
+            window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
           }
           onChange?.(cloudSales);
         } catch (err) {
@@ -843,17 +904,40 @@ export async function pullSalesFromFirestore(shopId?: string): Promise<{ pulled:
           shopId: data.shopId || shopId || 'shop-electrical-01',
           subtotal: Number(data.subtotal) || Number(data.total) || 0,
           total: Number(data.total) || 0,
+          status: data.status || 'completed',
+          voidReason: data.voidReason,
+          voidedAt: data.voidedAt,
+          voidedBy: data.voidedBy,
           createdAtClient: Number(data.createdAtClient) || Date.now(),
         });
       }
     }
 
     if (cloudSales.length > 0) {
+      // Check if any pulled sale is voided where local was completed
+      for (const cs of cloudSales) {
+        if (cs.status === 'voided') {
+          const localSale = await db.sales.get(cs.id);
+          if (localSale && localSale.status === 'completed') {
+            for (const line of cs.lines) {
+              const localItem = await db.items.get(line.itemId);
+              if (localItem) {
+                await db.items.update(line.itemId, {
+                  quantity: localItem.quantity + line.qty,
+                  updatedAt: Date.now(),
+                });
+              }
+            }
+          }
+        }
+      }
+
       await db.sales.bulkPut(cloudSales);
     }
 
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
+      window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
     }
 
     return { pulled: cloudSales.length };

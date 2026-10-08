@@ -39,8 +39,10 @@ export const SalesHistoryScreen: React.FC = () => {
       loadSales();
     };
     window.addEventListener('shopledger_sales_updated', handleUpdate);
+    window.addEventListener('shopledger_inventory_updated', handleUpdate);
     return () => {
       window.removeEventListener('shopledger_sales_updated', handleUpdate);
+      window.removeEventListener('shopledger_inventory_updated', handleUpdate);
     };
   }, [currentShop]);
 
