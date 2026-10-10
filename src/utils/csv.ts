@@ -2,6 +2,7 @@ import Papa from 'papaparse';
 import { Item, InventoryImportHistory } from '../types';
 import { db } from '../db';
 import { syncAllInventoryToFirestore } from '../db/sync';
+import { applyStockChangeTx } from '../db/stock';
 
 export const CSV_TEMPLATE_HEADERS = [
   'name',
@@ -151,20 +152,21 @@ export function parseCSVFile(
               return;
             }
 
-            // 3. Validate Quantity (Required, non-negative integer/number)
+            // 3. Validate Quantity (Required, non-negative whole integer)
             const cleanQty = quantityStr.replace(/[^0-9.-]/g, '');
-            const quantity = parseInt(cleanQty || '0', 10);
-            if (isNaN(quantity) || quantity < 0) {
+            const rawParsed = Number(cleanQty);
+            if (quantityStr === '' || !Number.isInteger(rawParsed) || rawParsed < 0) {
               errors.push({
                 row: rowNumber,
                 sku,
                 name,
                 field: 'quantity',
-                error: `Invalid quantity "${quantityStr}". Cannot be negative.`,
+                error: `Invalid quantity "${quantityStr}". Must be a whole integer 0 or greater.`,
                 rawData: row,
               });
               return;
             }
+            const quantity = rawParsed;
 
             // Optional Cost Price
             let costPrice = 0;
@@ -245,7 +247,7 @@ export async function executeBatchImport(params: {
   for (let i = 0; i < total; i += batchSize) {
     const batch = validRows.slice(i, i + batchSize);
 
-    await db.transaction('rw', [db.items, db.stockMovements], async () => {
+    await db.transaction('rw', [db.items, db.stockMovements, db.syncQueue], async () => {
       for (const row of batch) {
         try {
           const existing = existingBySku.get(row.sku);
@@ -255,65 +257,62 @@ export async function executeBatchImport(params: {
               // Do nothing
               continue;
             } else if (duplicateMode === 'add_stock') {
-              const newQty = existing.quantity + row.quantity;
-              await db.items.update(existing.id, {
-                quantity: newQty,
-                updatedAt: now,
-              });
-              await db.stockMovements.add({
-                id: `mov-imp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              await applyStockChangeTx({
                 shopId,
                 itemId: existing.id,
-                itemName: existing.name,
-                itemSku: existing.sku,
+                delta: row.quantity,
                 type: 'import',
-                qtyChange: row.quantity,
-                previousQty: existing.quantity,
-                newQty,
                 reason: `CSV Import add stock (${fileName})`,
                 userId,
                 userName,
-                createdAt: now,
+                now,
               });
               rowsUpdated++;
               affectedItemIds.push(existing.id);
             } else if (duplicateMode === 'update') {
-              const prevQty = existing.quantity;
+              // update: write metadata WITHOUT quantity, then apply the difference against FRESH stock
+              const fresh = await db.items.get(existing.id);
               await db.items.update(existing.id, {
                 name: row.name,
                 category: row.category || existing.category,
                 brand: row.brand || existing.brand,
                 costPrice: row.costPrice,
                 sellingPrice: row.sellingPrice,
-                quantity: row.quantity,
                 reorderLevel: row.reorderLevel,
                 barcode: row.barcode || existing.barcode,
                 supplier: row.supplier || existing.supplier,
                 description: row.description || existing.description,
                 updatedAt: now,
               });
-              if (prevQty !== row.quantity) {
-                await db.stockMovements.add({
-                  id: `mov-imp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+
+              await db.syncQueue.add({
+                id: `sync-imp-item-${existing.id}-${now}`,
+                entity: 'item',
+                action: 'update',
+                payload: { ...existing, ...row, updatedAt: now },
+                attempts: 0,
+                status: 'pending',
+                createdAt: now,
+              });
+
+              const delta = row.quantity - (fresh?.quantity ?? 0);
+              if (delta !== 0) {
+                await applyStockChangeTx({
                   shopId,
                   itemId: existing.id,
-                  itemName: row.name,
-                  itemSku: row.sku,
+                  delta,
                   type: 'import',
-                  qtyChange: row.quantity - prevQty,
-                  previousQty: prevQty,
-                  newQty: row.quantity,
                   reason: `CSV Import update details (${fileName})`,
                   userId,
                   userName,
-                  createdAt: now,
+                  now,
                 });
               }
               rowsUpdated++;
               affectedItemIds.push(existing.id);
             }
           } else {
-            // New item
+            // New item: add with quantity 0, then apply initial stock
             const newItemId = `item-imp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
             const newItem: Item = {
               id: newItemId,
@@ -325,7 +324,7 @@ export async function executeBatchImport(params: {
               brand: row.brand,
               costPrice: row.costPrice,
               sellingPrice: row.sellingPrice,
-              quantity: row.quantity,
+              quantity: 0,
               reorderLevel: row.reorderLevel,
               supplier: row.supplier || '',
               description: row.description || '',
@@ -337,21 +336,28 @@ export async function executeBatchImport(params: {
             await db.items.add(newItem);
             existingBySku.set(row.sku, newItem);
 
-            await db.stockMovements.add({
-              id: `mov-imp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-              shopId,
-              itemId: newItemId,
-              itemName: row.name,
-              itemSku: row.sku,
-              type: 'import',
-              qtyChange: row.quantity,
-              previousQty: 0,
-              newQty: row.quantity,
-              reason: `CSV Import initial (${fileName})`,
-              userId,
-              userName,
+            await db.syncQueue.add({
+              id: `sync-imp-item-${newItemId}-${now}`,
+              entity: 'item',
+              action: 'create',
+              payload: newItem,
+              attempts: 0,
+              status: 'pending',
               createdAt: now,
             });
+
+            if (row.quantity > 0) {
+              await applyStockChangeTx({
+                shopId,
+                itemId: newItemId,
+                delta: row.quantity,
+                type: 'import',
+                reason: `CSV Import new item (${fileName})`,
+                userId,
+                userName,
+                now,
+              });
+            }
 
             rowsAdded++;
             affectedItemIds.push(newItemId);

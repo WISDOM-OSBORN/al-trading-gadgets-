@@ -7,6 +7,7 @@ import {
   subscribeToCloudInventory,
   subscribeToCloudSales,
   pullSalesFromFirestore,
+  scheduleSync,
 } from '../db/sync';
 
 interface SyncContextType {
@@ -115,10 +116,13 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [effectiveOnline]);
 
-  // Online / offline event listeners
+  // Online / offline event listeners and sync scheduling
   useEffect(() => {
+    scheduleSync();
+
     const handleOnline = () => {
       setBrowserOnline(true);
+      scheduleSync();
     };
 
     const handleOffline = () => {
@@ -133,13 +137,14 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Initial check
     refreshPendingCount();
 
-    // Polling interval for pending queue & auto-sync
+    // 30s interval for scheduleSync & refresh
     const interval = setInterval(() => {
       refreshPendingCount();
       if (effectiveOnline) {
+        scheduleSync();
         triggerSync();
       }
-    }, 15000);
+    }, 30000);
 
     return () => {
       window.removeEventListener('online', handleOnline);

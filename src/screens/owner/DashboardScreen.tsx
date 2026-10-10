@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useSync } from '../../context/SyncContext';
 import { Sale, Item, Customer } from '../../types';
 import { db } from '../../db';
+import { adjustStock } from '../../db/sync';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
   DollarSign,
@@ -30,7 +31,7 @@ import {
 export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> = ({
   onNavigate,
 }) => {
-  const { currentShop } = useAuth();
+  const { currentShop, currentUser } = useAuth();
   const { lastSyncedTime, triggerSync, isSyncing } = useSync();
 
   const [dateRange, setDateRange] = useState<'today' | '7days' | '30days'>('7days');
@@ -199,31 +200,19 @@ export const DashboardScreen: React.FC<{ onNavigate?: (screen: any) => void }> =
 
   // Handle Restock action directly from dashboard
   const handleRestock = async () => {
-    if (!restockItem || !currentShop) return;
-    const numRestock = typeof restockAmount === 'number' ? restockAmount : parseInt(restockAmount, 10) || 0;
-    if (numRestock <= 0) return;
-
+    if (!restockItem || !currentShop || !currentUser) return;
+    const n = typeof restockAmount === 'number' ? restockAmount : Number(restockAmount);
+    if (!Number.isInteger(n) || n <= 0) return;
     try {
       setIsRestocking(true);
-      const newQty = restockItem.quantity + numRestock;
-      await db.items.update(restockItem.id, {
-        quantity: newQty,
-        updatedAt: Date.now(),
-      });
-      await db.stockMovements.add({
-        id: `mov-restock-${Date.now()}`,
+      await adjustStock({
         shopId: currentShop.id,
         itemId: restockItem.id,
-        itemName: restockItem.name,
-        itemSku: restockItem.sku,
-        type: 'restock',
-        qtyChange: numRestock,
-        previousQty: restockItem.quantity,
-        newQty,
-        reason: 'Dashboard Quick Restock',
-        userId: 'owner',
-        userName: 'Alex Rivera (Owner)',
-        createdAt: Date.now(),
+        qtyChange: n,
+        reasonType: 'restock',
+        notes: 'Dashboard quick restock',
+        userId: currentUser.uid,
+        userName: currentUser.name,
       });
       setRestockItem(null);
       await loadData();

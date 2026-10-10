@@ -218,6 +218,7 @@ export interface SyncQueueItem {
   payload: any;
   attempts: number;
   lastError?: string;
+  nextRetryAt?: number;
   status: 'pending' | 'syncing' | 'failed' | 'synced';
   createdAt: number;
 }

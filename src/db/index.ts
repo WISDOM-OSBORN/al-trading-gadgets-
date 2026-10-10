@@ -17,6 +17,8 @@ import { INITIAL_GADGETS, SEED_SHOP_ID } from './seedData';
 import { firestore } from './firebase';
 import { collection, getDocs, doc, deleteDoc, deleteField, setDoc } from 'firebase/firestore';
 import { hashPin } from '../utils/crypto';
+import { applyStockChangeTx, assertWholeNumber, newId } from './stock';
+import { scheduleSync } from './sync';
 
 export class ShopLedgerDatabase extends Dexie {
   shops!: Table<Shop, string>;
@@ -53,119 +55,66 @@ export class ShopLedgerDatabase extends Dexie {
 
 export const db = new ShopLedgerDatabase();
 
-// Initialize default store data if empty
+export const DESIGNATED_TEAM_ACCOUNTS: Omit<User, 'createdAt'>[] = [
+  {
+    uid: 'user-rajifarrid',
+    shopId: SEED_SHOP_ID,
+    name: 'Raji Farrid',
+    email: 'rajifarrid@gmail.com',
+    role: 'owner',
+    active: true,
+    deviceCode: 'D01',
+    pinHash: '', // populated with hashPin('1234') on init
+  },
+  {
+    uid: 'user-wisdomosborn',
+    shopId: SEED_SHOP_ID,
+    name: 'Wisdom Osborn',
+    email: 'wisdomosborn65@gmail.com',
+    role: 'owner',
+    active: true,
+    deviceCode: 'D01',
+    pinHash: '', // populated with hashPin('1234') on init
+  },
+  {
+    uid: 'user-abuyahwisdomosborn',
+    shopId: SEED_SHOP_ID,
+    name: 'Abuyah Wisdom Osborn',
+    email: 'abuyahwisdomosborn@gmail.com',
+    role: 'seller',
+    active: true,
+    deviceCode: 'D02',
+    pinHash: '', // populated with hashPin('1234') on init
+  },
+];
+
+// Initialize default store data locally and INSTANTLY (<10ms) without blocking on network roundtrips
 export async function initializeDatabase() {
   const shopCount = await db.shops.count();
+  const defaultPinHash = await hashPin('1234');
+
   if (shopCount === 0) {
-    let cloudShopFound = false;
-    let cloudItemsCount = 0;
-
-    // 1. Check if Cloud Firestore already has shop, users, and items
-    if (typeof navigator !== 'undefined' && navigator.onLine) {
-      try {
-        const shopSnap = await getDocs(collection(firestore, 'shops'));
-        if (!shopSnap.empty) {
-          const shopDoc = shopSnap.docs[0];
-          const sData = shopDoc.data() as Shop;
-          await db.shops.put({
-            ...sData,
-            id: shopDoc.id,
-          });
-          cloudShopFound = true;
-        }
-
-        // Pull users from Firestore
-        const userSnap = await getDocs(collection(firestore, 'users'));
-        for (const uDoc of userSnap.docs) {
-          const uData = uDoc.data() as User;
-          if (uData && uData.email) {
-            await db.users.put({
-              ...uData,
-              uid: uDoc.id,
-            });
-          }
-        }
-
-        // Check if items already exist in Firestore (from owner upload or setup)
-        const itemsSnap = await getDocs(collection(firestore, 'items'));
-        if (!itemsSnap.empty) {
-          cloudItemsCount = itemsSnap.docs.length;
-          const cloudItems: Item[] = [];
-          for (const iDoc of itemsSnap.docs) {
-            const iData = iDoc.data() as Item;
-            if (iData && iData.name) {
-              cloudItems.push({
-                ...iData,
-                id: iDoc.id,
-                costPrice: Number(iData.costPrice) || 0,
-                sellingPrice: Number(iData.sellingPrice) || 0,
-                quantity: Number(iData.quantity) || 0,
-                archived: Boolean(iData.archived),
-              });
-            }
-          }
-          await db.items.bulkPut(cloudItems);
-        }
-      } catch (err) {
-        console.warn('Initial cloud hydration check notice:', err);
-      }
-    }
-
-    if (!cloudShopFound) {
-      const defaultShop: Shop = {
-        id: SEED_SHOP_ID,
-        name: 'AL-Q ELECTRICALS',
-        currency: 'GHS',
-        currencySymbol: 'GH₵',
-        phone: '+233 24 123 4567',
-        address: 'Spintex Road, Accra, Ghana',
-        taxRate: 0,
-        settings: {
-          allowPriceOverride: true,
-          allowNegativeStock: false,
-          invoicePrefix: 'INV',
-          receiptFooter: 'Thank you for shopping at AL-Q ELECTRICALS! Quality electrical gadgets & accessories.',
-          lowStockThresholdDefault: 8,
-          taxRatePercent: 0,
-        },
-        createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
-      };
-      await db.shops.add(defaultShop);
-    }
-
-    // Ensure owner user exists
-    const ownerExists = await db.users.where('email').equalsIgnoreCase('rajifarrid@gmail.com').first();
-    if (!ownerExists) {
-      const defaultOwnerHash = await hashPin('1234');
-      const ownerUser: User = {
-        uid: 'user-rajifarrid',
-        shopId: SEED_SHOP_ID,
-        name: 'Raji Farrid',
-        email: 'rajifarrid@gmail.com',
-        role: 'owner',
-        active: true,
-        deviceCode: 'D01',
-        pinHash: defaultOwnerHash,
-        createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
-      };
-      await db.users.add(ownerUser);
-    }
-
-    // ONLY populate dummy initial gadgets if Cloud Firestore was completely empty of items
-    const wasPurged = localStorage.getItem('shopledger_last_purged_at');
-    if (cloudItemsCount === 0 && !wasPurged) {
-      const now = Date.now();
-      const itemRecords: Item[] = INITIAL_GADGETS.map((g, idx) => ({
-        ...g,
-        id: `item-${idx + 1}`,
-        shopId: SEED_SHOP_ID,
-        createdAt: now - 20 * 24 * 60 * 60 * 1000,
-        updatedAt: now,
-      }));
-      await db.items.bulkAdd(itemRecords);
-    }
+    const defaultShop: Shop = {
+      id: SEED_SHOP_ID,
+      name: 'AL-Q ELECTRICALS',
+      currency: 'GHS',
+      currencySymbol: 'GH₵',
+      phone: '+233 24 123 4567',
+      address: 'Spintex Road, Accra, Ghana',
+      taxRate: 0,
+      settings: {
+        allowPriceOverride: true,
+        allowNegativeStock: false,
+        invoicePrefix: 'INV',
+        receiptFooter: 'Thank you for shopping at AL-Q ELECTRICALS! Quality electrical gadgets & accessories.',
+        lowStockThresholdDefault: 8,
+        taxRatePercent: 0,
+      },
+      createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+    };
+    await db.shops.add(defaultShop);
   } else {
-    // Ensure existing shop has AL-Q ELECTRICALS and Ghanaian Cedi
+    // Ensure existing shop maintains AL-Q ELECTRICALS branding & GHS currency
     const existing = await db.shops.toCollection().first();
     if (existing) {
       await db.shops.update(existing.id, {
@@ -174,55 +123,67 @@ export async function initializeDatabase() {
         currencySymbol: 'GH₵',
       });
     }
+  }
 
-    // Sanitize accounts: Remove blocked account gha@gmail.com and old prototype accounts
-    const blockedEmails = [
-      'gha@gmail.com',
-      'owner@shopledger.app',
-      'alex.rivera@shopledger.app',
-    ];
+  // 2. Ensure all pre-configured business accounts (Raji Farrid, Wisdom Osborn, Abuyah Wisdom Osborn) exist
+  const existingShop = await db.shops.toCollection().first();
+  const targetShopId = existingShop?.id || SEED_SHOP_ID;
 
-    const allUsers = await db.users.toArray();
-    let keptRaji = false;
-
-    for (const u of allUsers) {
-      const emailLower = (u.email || '').toLowerCase().trim();
-      if (blockedEmails.includes(emailLower)) {
-        await db.users.delete(u.uid);
-      } else if (emailLower === 'rajifarrid@gmail.com') {
-        if (!keptRaji) {
-          keptRaji = true;
-          const ownerHash = await hashPin('1234');
-          await db.users.update(u.uid, {
-            name: 'Raji Farrid',
-            email: 'rajifarrid@gmail.com',
-            role: 'owner',
-            active: true,
-            deviceCode: 'D01',
-            pinHash: ownerHash,
-          });
-        } else {
-          await db.users.delete(u.uid);
-        }
-      }
-      // Real workers created by admin (role === 'seller') are strictly PRESERVED!
-    }
-
-    if (!keptRaji) {
-      const shopId = existing?.id || SEED_SHOP_ID;
-      const ownerHash = await hashPin('1234');
+  for (const acct of DESIGNATED_TEAM_ACCOUNTS) {
+    const existingUser = await db.users.where('email').equalsIgnoreCase(acct.email).first();
+    if (!existingUser) {
       await db.users.put({
-        uid: 'user-rajifarrid',
-        shopId,
-        name: 'Raji Farrid',
-        email: 'rajifarrid@gmail.com',
-        role: 'owner',
-        active: true,
-        deviceCode: 'D01',
-        pinHash: ownerHash,
+        ...acct,
+        shopId: targetShopId,
+        pinHash: defaultPinHash,
         createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
       });
+    } else {
+      // Ensure role, active status, and pinHash are updated
+      await db.users.update(existingUser.uid, {
+        name: acct.name,
+        role: acct.role,
+        active: true,
+        deviceCode: acct.deviceCode,
+        pinHash: existingUser.pinHash || defaultPinHash,
+      });
     }
+  }
+
+  // 3. Remove blocked / deprecated accounts
+  const blockedEmails = [
+    'gha@gmail.com',
+    'owner@shopledger.app',
+    'alex.rivera@shopledger.app',
+  ];
+  const allUsers = await db.users.toArray();
+  for (const u of allUsers) {
+    const emailLower = (u.email || '').toLowerCase().trim();
+    if (blockedEmails.includes(emailLower)) {
+      await db.users.delete(u.uid);
+    }
+  }
+
+  // 4. Ensure initial gadgets catalog is present if items table is empty
+  const currentItemCount = await db.items.count();
+  const wasPurged = localStorage.getItem('shopledger_last_purged_at');
+  if (currentItemCount === 0 && !wasPurged) {
+    const now = Date.now();
+    const itemRecords: Item[] = INITIAL_GADGETS.map((g, idx) => ({
+      ...g,
+      id: `item-${idx + 1}`,
+      shopId: targetShopId,
+      createdAt: now - 20 * 24 * 60 * 60 * 1000,
+      updatedAt: now,
+    }));
+    await db.items.bulkPut(itemRecords);
+  }
+
+  // 5. Non-blocking asynchronous cloud hydration in background
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    setTimeout(() => {
+      syncUsersFromFirestore().catch(() => {});
+    }, 100);
   }
 }
 
@@ -273,25 +234,34 @@ export async function syncUsersFromFirestore(): Promise<void> {
   }
 }
 
-// Purge all cashier and staff accounts created by mistake (keeps ONLY store owner)
+// Purge all cashier and staff accounts created by mistake (keeps store owners and designated seller)
 export async function deleteAllCashierStaffAccounts(): Promise<number> {
   let count = 0;
-  // 1. Delete all non-owner staff from local Dexie
+  const isProtected = (email?: string) => {
+    const l = (email || '').toLowerCase().trim();
+    return (
+      l === 'rajifarrid@gmail.com' ||
+      l === 'wisdomosborn65@gmail.com' ||
+      l === 'abuyahwisdomosborn@gmail.com'
+    );
+  };
+
+  // 1. Delete all non-protected staff from local Dexie
   const localUsers = await db.users.toArray();
   for (const u of localUsers) {
-    if (u.email?.toLowerCase() !== 'rajifarrid@gmail.com' && u.role !== 'owner') {
+    if (!isProtected(u.email) && u.role !== 'owner') {
       await db.users.delete(u.uid);
       count++;
     }
   }
 
-  // 2. Delete all non-owner staff from Firestore
+  // 2. Delete all non-protected staff from Firestore
   try {
     const snap = await getDocs(collection(firestore, 'users'));
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
       const email = (data.email || '').toLowerCase().trim();
-      if (email !== 'rajifarrid@gmail.com' && data.role !== 'owner') {
+      if (!isProtected(email) && data.role !== 'owner') {
         await deleteDoc(doc(firestore, 'users', docSnap.id));
         count++;
       }
@@ -312,81 +282,74 @@ export async function recordOwnerWithdrawal(params: {
   userId: string;
   userName: string;
 }): Promise<OwnerWithdrawal> {
-  const item = await db.items.get(params.itemId);
-  if (!item) throw new Error('Item not found in inventory.');
-  if (item.quantity < params.quantity) {
-    throw new Error(`Insufficient stock for "${item.name}". Only ${item.quantity} available.`);
-  }
-
+  assertWholeNumber(params.quantity, 'Quantity');
+  if (params.quantity < 1) throw new Error('Quantity must be at least 1.');
   const now = Date.now();
-  const withdrawalId = `with-${now}-${Math.random().toString(36).slice(2, 7)}`;
-  const previousQty = item.quantity;
-  const newQty = item.quantity - params.quantity;
-  const totalCostValue = (item.costPrice || 0) * params.quantity;
+  let record!: OwnerWithdrawal;
 
-  const withdrawal: OwnerWithdrawal = {
-    id: withdrawalId,
-    shopId: params.shopId,
-    itemId: item.id,
-    itemName: item.name,
-    itemSku: item.sku,
-    quantity: params.quantity,
-    costPrice: item.costPrice || 0,
-    sellingPrice: item.sellingPrice || 0,
-    totalCostValue,
-    reason: params.reason || 'Owner Withdrawal',
-    userId: params.userId,
-    userName: params.userName,
-    createdAt: now,
-  };
+  await db.transaction('rw',
+    [db.items, db.stockMovements, db.withdrawals, db.auditLogs, db.syncQueue],
+    async () => {
+      const item = await db.items.get(params.itemId);
+      if (!item) throw new Error('Item not found in inventory.');
+      const withdrawalId = newId('with');
+      const mv = await applyStockChangeTx({
+        shopId: params.shopId,
+        itemId: item.id,
+        delta: -params.quantity,
+        type: 'withdrawal',
+        reason: `Owner Withdrawal: ${params.reason}`,
+        refId: withdrawalId,
+        userId: params.userId,
+        userName: params.userName,
+        now,
+      });
+      record = {
+        id: withdrawalId,
+        shopId: params.shopId,
+        itemId: item.id,
+        itemName: item.name,
+        itemSku: item.sku,
+        quantity: params.quantity,
+        costPrice: item.costPrice || 0,
+        sellingPrice: item.sellingPrice || 0,
+        totalCostValue: (item.costPrice || 0) * params.quantity,
+        reason: params.reason || 'Owner Withdrawal',
+        userId: params.userId,
+        userName: params.userName,
+        createdAt: now,
+      };
+      await db.withdrawals.add(record);
+      await db.auditLogs.add({
+        id: newId('audit'),
+        shopId: params.shopId,
+        action: 'stock_adjusted',
+        entity: 'items',
+        entityId: item.id,
+        userId: params.userId,
+        userName: params.userName,
+        meta: {
+          action: 'owner_withdrawal',
+          quantityWithdrawn: params.quantity,
+          remainingStock: mv.newQty,
+          costValue: record.totalCostValue,
+          reason: params.reason,
+        },
+        createdAt: now,
+      });
+      await db.syncQueue.add({
+        id: newId('sync'),
+        entity: 'withdrawal',
+        action: 'create',
+        payload: record,
+        attempts: 0,
+        status: 'pending',
+        createdAt: now,
+      });
+    });
 
-  // 1. Deduct stock in IndexedDB
-  await db.items.update(item.id, {
-    quantity: newQty,
-    updatedAt: now,
-  });
-
-  // 2. Add Stock Movement
-  await db.stockMovements.add({
-    id: `sm-${now}-${Math.random().toString(36).slice(2, 7)}`,
-    shopId: params.shopId,
-    itemId: item.id,
-    itemName: item.name,
-    itemSku: item.sku,
-    type: 'withdrawal',
-    qtyChange: -params.quantity,
-    previousQty,
-    newQty,
-    reason: `Owner Withdrawal: ${params.reason}`,
-    refId: withdrawalId,
-    userId: params.userId,
-    userName: params.userName,
-    createdAt: now,
-  });
-
-  // 3. Save Withdrawal record
-  await db.withdrawals.add(withdrawal);
-
-  // 4. Audit Log
-  await db.auditLogs.add({
-    id: `audit-${now}`,
-    shopId: params.shopId,
-    action: 'stock_adjusted',
-    entity: 'items',
-    entityId: item.id,
-    userId: params.userId,
-    userName: params.userName,
-    meta: {
-      action: 'owner_withdrawal',
-      quantityWithdrawn: params.quantity,
-      remainingStock: newQty,
-      costValue: totalCostValue,
-      reason: params.reason,
-    },
-    createdAt: now,
-  });
-
-  return withdrawal;
+  scheduleSync();
+  return record;
 }
 
 // Purge dummy/sample inventory, sales, and dummy accounts for clean production

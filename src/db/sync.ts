@@ -6,11 +6,12 @@ import {
   getDoc,
   getDocs,
   deleteDoc,
-  writeBatch,
   collection,
   query,
   where,
   onSnapshot,
+  runTransaction,
+  increment,
 } from 'firebase/firestore';
 import {
   Item,
@@ -24,6 +25,13 @@ import {
   Customer,
   AuditLog,
 } from '../types';
+import {
+  applyStockChangeTx,
+  assertWholeNumber,
+  newId,
+  pendingDeltaByItem,
+  StockError,
+} from './stock';
 
 export interface RecordSaleParams {
   shopId: string;
@@ -31,7 +39,7 @@ export interface RecordSaleParams {
   sellerName: string;
   deviceCode: string;
   invoicePrefix: string;
-  allowNegativeStock: boolean;
+  allowNegativeStock?: boolean;
   customerName?: string;
   customerPhone?: string;
   lines: SaleLineItem[];
@@ -43,55 +51,197 @@ export interface RecordSaleParams {
   notes?: string;
 }
 
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+const MAX_ATTEMPTS = 8;
+const backoffMs = (attempts: number) => Math.min(5 * 60_000, 2_000 * 2 ** attempts);
+
 // Generate offline-safe collision-free invoice number: <prefix>-<deviceCode>-<seq>
 export async function generateNextInvoiceNumber(prefix: string, deviceCode: string): Promise<string> {
   const deviceKey = `shopledger_seq_${deviceCode}`;
-  let seq = parseInt(localStorage.getItem(deviceKey) || '0', 10);
+  let seq = typeof localStorage !== 'undefined' ? parseInt(localStorage.getItem(deviceKey) || '0', 10) : 0;
   if (isNaN(seq) || seq < 1) {
-    // Find highest invoice in database for this deviceCode
     const existingSales = await db.sales
       .filter((s) => s.deviceCode === deviceCode)
       .toArray();
     seq = existingSales.length;
   }
   seq += 1;
-  localStorage.setItem(deviceKey, seq.toString());
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(deviceKey, seq.toString());
+  }
 
   const paddedSeq = seq.toString().padStart(4, '0');
   return `${prefix}-${deviceCode}-${paddedSeq}`;
 }
 
+async function pushStockMovement(m: StockMovement): Promise<void> {
+  const movRef = doc(firestore, 'stockMovements', m.id);
+  const itemRef = doc(firestore, 'items', m.itemId);
+  await runTransaction(firestore, async (tx) => {
+    const snap = await tx.get(movRef);
+    if (snap.exists()) return; // already applied -> idempotent retry
+    tx.set(movRef, sanitizeForFirestore({ ...m, syncedAt: Date.now() }));
+
+    const itemSnap = await tx.get(itemRef);
+    if (itemSnap.exists()) {
+      const currentCloudQty = Number(itemSnap.data()?.quantity) || 0;
+      const targetQty = Math.max(0, currentCloudQty + m.qtyChange);
+      tx.set(
+        itemRef,
+        { quantity: targetQty, updatedAt: m.createdAt, lastMovementId: m.id },
+        { merge: true }
+      );
+    } else {
+      // Document didn't exist in Firestore yet: fetch item from local DB
+      const localItem = await db.items.get(m.itemId);
+      if (localItem) {
+        tx.set(
+          itemRef,
+          sanitizeForFirestore({
+            ...localItem,
+            quantity: Math.max(0, m.newQty),
+            lastMovementId: m.id,
+            updatedAt: m.createdAt,
+          })
+        );
+      }
+    }
+  });
+}
+
+/** Pushes item and retains/updates full metadata and stock quantity. */
+export async function pushItem(item: Item, _seedQuantity = true): Promise<void> {
+  const ref = doc(firestore, 'items', item.id);
+  const clean = sanitizeForFirestore(item) as Item;
+  await runTransaction(firestore, async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists()) {
+      tx.set(ref, clean, { merge: true });
+    } else {
+      tx.set(ref, clean);
+    }
+  });
+}
+
+async function dispatchQueueItem(q: SyncQueueItem): Promise<void> {
+  const p = q.payload;
+  switch (q.entity) {
+    case 'stockMovement':
+      return pushStockMovement(p as StockMovement);
+    case 'item':
+      if (q.action === 'delete') {
+        return deleteDoc(doc(firestore, 'items', p.id));
+      }
+      return pushItem(p as Item);
+    case 'sale':
+      await setDoc(doc(firestore, 'sales', p.id), sanitizeForFirestore(p), { merge: true });
+      await db.sales.update(p.id, { syncedAt: Date.now() });
+      return;
+    case 'withdrawal':
+      return setDoc(doc(firestore, 'withdrawals', p.id), sanitizeForFirestore(p), { merge: true });
+    case 'import':
+      return setDoc(doc(firestore, 'imports', p.id), sanitizeForFirestore(p), { merge: true });
+    case 'customer':
+      return setDoc(doc(firestore, 'customers', p.id), sanitizeForFirestore(p), { merge: true });
+    case 'customerPayment':
+      return setDoc(doc(firestore, 'customerPayments', p.id), sanitizeForFirestore(p), { merge: true });
+    case 'auditLog':
+      return setDoc(doc(firestore, 'auditLogs', p.id), sanitizeForFirestore(p), { merge: true });
+    default:
+      throw new Error(`No sync handler for entity "${(q as any).entity}"`);
+  }
+}
+
+let running = false;
+
+export async function processSyncQueue(): Promise<{ synced: number; remaining: number }> {
+  const countOpen = () =>
+    db.syncQueue.where('status').anyOf('pending', 'failed', 'syncing').count();
+
+  if (running || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+    return { synced: 0, remaining: await countOpen() };
+  }
+  running = true;
+  let synced = 0;
+  try {
+    // Recover rows left in 'syncing' by a closed tab / crash.
+    await db.syncQueue.where('status').equals('syncing').modify({ status: 'pending' });
+
+    const now = Date.now();
+    const due = (await db.syncQueue.where('status').anyOf('pending', 'failed').sortBy('createdAt'))
+      .filter((q) => q.attempts < MAX_ATTEMPTS && (q.nextRetryAt ?? 0) <= now)
+      .slice(0, 50);
+
+    for (const q of due) {
+      try {
+        await db.syncQueue.update(q.id, { status: 'syncing' });
+        await dispatchQueueItem(q);
+        await db.syncQueue.update(q.id, { status: 'synced' });
+        synced++;
+      } catch (err: any) {
+        const attempts = q.attempts + 1;
+        await db.syncQueue.update(q.id, {
+          status: 'failed',
+          attempts,
+          lastError: err instanceof Error ? err.message : 'Sync error',
+          nextRetryAt: Date.now() + backoffMs(attempts),
+        });
+      }
+    }
+
+    // Our own writes change cloud quantities; re-merge so local = cloud + still-pending deltas.
+    if (synced > 0) {
+      const shop = await db.shops.toCollection().first();
+      if (shop) await pullInventoryFromFirestore(shop.id);
+    }
+  } finally {
+    running = false;
+  }
+  return { synced, remaining: await countOpen() };
+}
+
+/** Call after every local mutation, on app start, on the 'online' event and on a 30s interval. */
+export function scheduleSync(): void {
+  const run = () => void processSyncQueue().catch(() => {});
+  if (typeof navigator !== 'undefined' && 'locks' in navigator) {
+    void navigator.locks.request('shopledger-sync', { ifAvailable: true }, async (lock) => {
+      if (lock) await processSyncQueue().catch(() => {});
+    });
+  } else {
+    run();
+  }
+}
+
 // Atomically record a sale
 export async function recordSale(params: RecordSaleParams): Promise<Sale> {
-  const {
-    shopId,
-    sellerId,
-    sellerName,
-    deviceCode,
-    invoicePrefix,
-    allowNegativeStock,
-    customerName,
-    customerPhone,
-    lines,
-    subtotal,
-    discountTotal,
-    tax,
-    total,
-    payments,
-    notes,
-  } = params;
+  const { shopId, sellerId, sellerName, deviceCode, invoicePrefix, customerName, customerPhone, notes } = params;
+  if (!params.lines || !params.lines.length) throw new StockError('Sale has no items.');
 
-  const saleId = `sale-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-  const invoiceNo = await generateNextInvoiceNumber(invoicePrefix || 'INV', deviceCode || 'D01');
-  const now = Date.now();
-  const exactTimeSold = new Date(now).toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
+  // 1. Never trust client math or quantities.
+  const lines: SaleLineItem[] = params.lines.map((l) => {
+    assertWholeNumber(l.qty, `Quantity for "${l.name}"`);
+    if (l.qty < 1) throw new StockError(`Quantity for "${l.name}" must be at least 1.`);
+    const unitPrice = Number(l.unitPrice);
+    const discount = Number(l.discount) || 0;
+    if (!(unitPrice >= 0) || discount < 0) throw new StockError('Invalid price or discount.');
+    const lineTotal = round2(l.qty * unitPrice - discount);
+    if (lineTotal < 0) throw new StockError('Discount cannot exceed the line amount.');
+    return { ...l, unitPrice, discount, lineTotal };
   });
+  const subtotal = round2(lines.reduce((s, l) => s + l.qty * l.unitPrice, 0));
+  const discountTotal = round2(lines.reduce((s, l) => s + l.discount, 0));
+  const tax = round2(params.tax ?? 0);
+  const total = round2(subtotal - discountTotal + tax);
+  const payments = params.payments ?? [{ method: 'Cash' as const, amount: total }];
+  if (Math.abs(round2(payments.reduce((s, p) => s + p.amount, 0)) - total) > 0.005) {
+    throw new StockError('Payments do not add up to the sale total.');
+  }
 
-  const newSale: Sale = {
+  const saleId = newId('sale');
+  const now = Date.now();
+  const invoiceNo = await generateNextInvoiceNumber(invoicePrefix || 'INV', deviceCode || 'D01');
+
+  const sale: Sale = {
     id: saleId,
     invoiceNo,
     shopId,
@@ -100,181 +250,116 @@ export async function recordSale(params: RecordSaleParams): Promise<Sale> {
     customerName: customerName?.trim() || undefined,
     customerPhone: customerPhone?.trim() || undefined,
     lines,
-    subtotal: subtotal || total,
-    discountTotal: discountTotal || 0,
-    tax: tax || 0,
+    subtotal,
+    discountTotal,
+    tax,
     total,
-    payments: payments || [{ method: 'Cash', amount: total }],
+    payments,
     status: 'completed',
     createdAtClient: now,
-    exactTimeSold,
-    syncedAt: navigator.onLine ? now : null,
+    exactTimeSold: new Date(now).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    }),
+    syncedAt: null,
     deviceCode,
     notes,
   };
 
-  await db.transaction('rw', [
-    db.items,
-    db.sales,
-    db.stockMovements,
-    db.customers,
-    db.auditLogs,
-    db.syncQueue,
-  ], async () => {
-    // 1. Validate & Decrement stock
-    for (const line of lines) {
-      const item = await db.items.get(line.itemId);
-      if (!item) {
-        throw new Error(`Item ${line.name} (SKU: ${line.sku}) not found.`);
-      }
+  await db.transaction('rw',
+    [db.shops, db.items, db.sales, db.stockMovements, db.customers, db.auditLogs, db.syncQueue],
+    async () => {
+      // Settings come from the DB, not from the caller.
+      const shop = await db.shops.get(shopId);
+      const allowNegative = shop?.settings?.allowNegativeStock === true;
+      const allowOverride = shop?.settings?.allowPriceOverride !== false;
 
-      if (!allowNegativeStock && item.quantity < line.qty) {
-        throw new Error(
-          `Insufficient stock for "${item.name}". In stock: ${item.quantity}, requested: ${line.qty}.`
-        );
-      }
-
-      const prevQty = item.quantity;
-      const newQty = prevQty - line.qty;
-      newSale.remainingStockAfterSale = newQty;
-
-      await db.items.update(item.id, {
-        quantity: newQty,
-        updatedAt: now,
-      });
-
-      // Record stock movement
-      const movement: StockMovement = {
-        id: `mov-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-        shopId,
-        itemId: item.id,
-        itemName: item.name,
-        itemSku: item.sku,
-        type: 'sale',
-        qtyChange: -line.qty,
-        previousQty: prevQty,
-        newQty: newQty,
-        reason: `Sale ${invoiceNo}`,
-        refId: saleId,
-        userId: sellerId,
-        userName: sellerName,
-        createdAt: now,
-      };
-      await db.stockMovements.add(movement);
-    }
-
-    // 2. Handle Credit balance if applicable
-    const creditPayment = payments?.find((p) => p.method === 'Credit');
-    if (creditPayment && creditPayment.amount > 0) {
-      const cName = customerName?.trim() || 'Unknown Customer';
-      const cPhone = customerPhone?.trim() || '';
-
-      // Check if customer already exists by phone or name
-      let customer = await db.customers
-        .filter((c) => (cPhone && c.phone === cPhone) || c.name.toLowerCase() === cName.toLowerCase())
-        .first();
-
-      if (customer) {
-        await db.customers.update(customer.id, {
-          balanceOwed: (customer.balanceOwed || 0) + creditPayment.amount,
-          updatedAt: now,
-        });
-        newSale.customerId = customer.id;
-      } else {
-        const newCustomerId = `cust-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-        const newCust: Customer = {
-          id: newCustomerId,
+      let lastRemaining: number | undefined;
+      for (const l of lines) {
+        const item = await db.items.get(l.itemId);
+        if (!item) throw new StockError(`Item "${l.name}" (SKU: ${l.sku}) not found.`);
+        if (!allowOverride && l.unitPrice !== item.sellingPrice) {
+          throw new StockError(`Price override is not allowed for "${item.name}".`);
+        }
+        const mv = await applyStockChangeTx({
           shopId,
-          name: cName,
-          phone: cPhone,
-          balanceOwed: creditPayment.amount,
-          createdAt: now,
-          updatedAt: now,
-        };
-        await db.customers.add(newCust);
-        newSale.customerId = newCustomerId;
-      }
-    }
-
-    // 3. Save Sale
-    await db.sales.add(newSale);
-
-    // 4. Audit Log
-    const audit: AuditLog = {
-      id: `audit-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      shopId,
-      action: 'sale_created',
-      entity: 'sales',
-      entityId: saleId,
-      userId: sellerId,
-      userName: sellerName,
-      meta: {
-        invoiceNo,
-        total,
-        itemsCount: lines.length,
-        isOffline: !navigator.onLine,
-      },
-      createdAt: now,
-    };
-    await db.auditLogs.add(audit);
-
-    // 5. Add to Sync Queue
-    const syncItem: SyncQueueItem = {
-      id: `sync-${saleId}`,
-      entity: 'sale',
-      action: 'create',
-      payload: newSale,
-      attempts: 0,
-      status: navigator.onLine ? 'synced' : 'pending',
-      createdAt: now,
-    };
-    await db.syncQueue.add(syncItem);
-
-    // Enqueue updated item quantities to syncQueue for robust offline/online parity
-    for (const line of lines) {
-      const item = await db.items.get(line.itemId);
-      if (item) {
-        await db.syncQueue.add({
-          id: `sync-item-${item.id}-${now}`,
-          entity: 'item',
-          action: 'update',
-          payload: item,
-          attempts: 0,
-          status: navigator.onLine ? 'synced' : 'pending',
-          createdAt: now,
+          itemId: l.itemId,
+          delta: -l.qty,
+          type: 'sale',
+          reason: `Sale ${invoiceNo}`,
+          refId: saleId,
+          userId: sellerId,
+          userName: sellerName,
+          allowNegative,
+          now,
         });
+        lastRemaining = mv.newQty;
       }
-    }
-  });
+      if (lines.length === 1) sale.remainingStockAfterSale = lastRemaining;
 
-  // 6. Direct real-time write to Firestore if online
-  if (typeof navigator !== 'undefined' && navigator.onLine) {
-    try {
-      await setDoc(doc(firestore, 'sales', newSale.id), sanitizeForFirestore(newSale), { merge: true });
-      await db.sales.update(newSale.id, { syncedAt: now });
+      // Handle Credit balance if applicable
+      const creditPayment = payments?.find((p) => p.method === 'Credit');
+      if (creditPayment && creditPayment.amount > 0) {
+        const cName = customerName?.trim() || 'Unknown Customer';
+        const cPhone = customerPhone?.trim() || '';
 
-      // Update full item records with updated quantities in Firestore
-      for (const line of lines) {
-        const currentItem = await db.items.get(line.itemId);
-        if (currentItem) {
-          await setDoc(
-            doc(firestore, 'items', line.itemId),
-            sanitizeForFirestore(currentItem),
-            { merge: true }
-          );
+        let customer = await db.customers
+          .filter((c) => (cPhone && c.phone === cPhone) || c.name.toLowerCase() === cName.toLowerCase())
+          .first();
+
+        if (customer) {
+          await db.customers.update(customer.id, {
+            balanceOwed: (customer.balanceOwed || 0) + creditPayment.amount,
+            updatedAt: now,
+          });
+          sale.customerId = customer.id;
+        } else {
+          const newCustomerId = newId('cust');
+          const newCust: Customer = {
+            id: newCustomerId,
+            shopId,
+            name: cName,
+            phone: cPhone,
+            balanceOwed: creditPayment.amount,
+            createdAt: now,
+            updatedAt: now,
+          };
+          await db.customers.add(newCust);
+          sale.customerId = newCustomerId;
         }
       }
-    } catch (fErr) {
-      console.warn('Direct Firestore sale write scheduled to retry:', fErr);
-    }
-  }
 
+      await db.sales.add(sale);
+      await db.auditLogs.add({
+        id: newId('audit'),
+        shopId,
+        action: 'sale_created',
+        entity: 'sales',
+        entityId: saleId,
+        userId: sellerId,
+        userName: sellerName,
+        meta: { invoiceNo, total, itemsCount: lines.length, isOffline: !navigator.onLine },
+        createdAt: now,
+      });
+      await db.syncQueue.add({
+        id: newId('sync'),
+        entity: 'sale',
+        action: 'create',
+        payload: sale,
+        attempts: 0,
+        status: 'pending',
+        createdAt: now,
+      });
+    });
+
+  scheduleSync();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
     window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
   }
-
-  return newSale;
+  return sale;
 }
 
 // Void a sale with stock restoration and audit log
@@ -295,54 +380,26 @@ export async function voidSale(
     db.syncQueue,
   ], async () => {
     const sale = await db.sales.get(saleId);
-    if (!sale) throw new Error('Sale not found.');
-    if (sale.status === 'voided') throw new Error('Sale is already voided.');
+    if (!sale) throw new StockError('Sale not found.');
+    if (sale.status === 'voided') throw new StockError('Sale is already voided.');
 
-    // 1. Restore stock in local ledger
     for (const line of sale.lines) {
-      const item = await db.items.get(line.itemId);
-      if (item) {
-        const prevQty = item.quantity;
-        const newQty = prevQty + line.qty;
-
-        await db.items.update(item.id, {
-          quantity: newQty,
-          updatedAt: now,
-        });
-
-        const movement: StockMovement = {
-          id: `mov-void-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          shopId: sale.shopId,
-          itemId: item.id,
-          itemName: item.name,
-          itemSku: item.sku,
-          type: 'return',
-          qtyChange: line.qty,
-          previousQty: prevQty,
-          newQty: newQty,
-          reason: `Void sale ${sale.invoiceNo}: ${voidReason}`,
-          refId: sale.id,
-          userId,
-          userName,
-          createdAt: now,
-        };
-        await db.stockMovements.add(movement);
-
-        // Queue item stock restoration for sync
-        await db.syncQueue.add({
-          id: `sync-item-void-${item.id}-${now}`,
-          entity: 'item',
-          action: 'update',
-          payload: { ...item, quantity: newQty, updatedAt: now },
-          attempts: 0,
-          status: navigator.onLine ? 'synced' : 'pending',
-          createdAt: now,
-        });
-      }
+      if (!(await db.items.get(line.itemId))) continue; // item was deleted: nothing to restore
+      await applyStockChangeTx({
+        shopId: sale.shopId,
+        itemId: line.itemId,
+        delta: line.qty,
+        type: 'return',
+        reason: `Void sale ${sale.invoiceNo}: ${voidReason}`,
+        refId: sale.id,
+        userId,
+        userName,
+        now,
+      });
     }
 
-    // 2. Reverse customer credit balance if sale had credit
-    const creditPayment = sale.payments.find((p) => p.method === 'Credit');
+    // Reverse customer credit balance if sale had credit
+    const creditPayment = sale.payments?.find((p) => p.method === 'Credit');
     if (creditPayment && creditPayment.amount > 0 && sale.customerId) {
       const customer = await db.customers.get(sale.customerId);
       if (customer) {
@@ -354,7 +411,6 @@ export async function voidSale(
       }
     }
 
-    // 3. Mark sale as voided
     await db.sales.update(saleId, {
       status: 'voided',
       voidReason,
@@ -362,63 +418,30 @@ export async function voidSale(
       voidedBy: userName,
     });
 
-    // 4. Audit Log
-    const audit: AuditLog = {
-      id: `audit-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    await db.auditLogs.add({
+      id: newId('audit'),
       shopId: sale.shopId,
       action: 'sale_voided',
       entity: 'sales',
       entityId: saleId,
       userId,
       userName,
-      meta: {
-        invoiceNo: sale.invoiceNo,
-        amount: sale.total,
-        reason: voidReason,
-      },
+      meta: { invoiceNo: sale.invoiceNo, amount: sale.total, reason: voidReason },
       createdAt: now,
-    };
-    await db.auditLogs.add(audit);
+    });
 
-    // 5. Add void sync
-    const syncItem: SyncQueueItem = {
-      id: `sync-void-${saleId}-${now}`,
+    await db.syncQueue.add({
+      id: newId('sync'),
       entity: 'sale',
       action: 'update',
-      payload: { id: saleId, status: 'voided', voidReason, voidedAt: now, voidedBy: userName },
+      payload: { id: saleId, status: 'voided', voidReason, voidedAt: now, voidedBy: userName, updatedAt: now },
       attempts: 0,
-      status: navigator.onLine ? 'synced' : 'pending',
+      status: 'pending',
       createdAt: now,
-    };
-    await db.syncQueue.add(syncItem);
+    });
   });
 
-  // Direct live Firestore write if online: immediately updates Firestore sales & items docs
-  if (typeof navigator !== 'undefined' && navigator.onLine) {
-    try {
-      const sale = await db.sales.get(saleId);
-      if (sale) {
-        await setDoc(
-          doc(firestore, 'sales', saleId),
-          { status: 'voided', voidReason, voidedAt: now, voidedBy: userName },
-          { merge: true }
-        );
-        for (const line of sale.lines) {
-          const currentItem = await db.items.get(line.itemId);
-          if (currentItem) {
-            await setDoc(
-              doc(firestore, 'items', line.itemId),
-              sanitizeForFirestore(currentItem),
-              { merge: true }
-            );
-          }
-        }
-      }
-    } catch (fErr) {
-      console.warn('Direct Firestore void write notice:', fErr);
-    }
-  }
-
+  scheduleSync();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
     window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
@@ -436,184 +459,54 @@ export async function adjustStock(params: {
   userName: string;
 }): Promise<number> {
   const { shopId, itemId, qtyChange, reasonType, notes, userId, userName } = params;
-  const now = Date.now();
-
   let finalQty = 0;
+
   await db.transaction('rw', [db.items, db.stockMovements, db.auditLogs, db.syncQueue], async () => {
-    const item = await db.items.get(itemId);
-    if (!item) throw new Error('Item not found.');
-
-    const prevQty = item.quantity;
-    finalQty = prevQty + qtyChange;
-
-    await db.items.update(itemId, {
-      quantity: finalQty,
-      updatedAt: now,
-    });
-
-    const movement: StockMovement = {
-      id: `mov-adj-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    const mv = await applyStockChangeTx({
       shopId,
       itemId,
-      itemName: item.name,
-      itemSku: item.sku,
+      delta: qtyChange,
       type: reasonType === 'restock' ? 'restock' : 'adjustment',
-      qtyChange,
-      previousQty: prevQty,
-      newQty: finalQty,
       reason: `${reasonType.toUpperCase()}: ${notes}`,
       userId,
       userName,
-      createdAt: now,
-    };
-    await db.stockMovements.add(movement);
-
+    });
+    finalQty = mv.newQty;
     await db.auditLogs.add({
-      id: `audit-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      id: newId('audit'),
       shopId,
       action: 'stock_adjusted',
       entity: 'items',
       entityId: itemId,
       userId,
       userName,
-      meta: {
-        sku: item.sku,
-        name: item.name,
-        qtyChange,
-        previousQty: prevQty,
-        newQty: finalQty,
-        reason: `${reasonType}: ${notes}`,
-      },
-      createdAt: now,
-    });
-
-    await db.syncQueue.add({
-      id: `sync-adj-${itemId}-${now}`,
-      entity: 'item',
-      action: 'update',
-      payload: { id: itemId, quantity: finalQty },
-      attempts: 0,
-      status: 'pending',
-      createdAt: now,
+      meta: { qtyChange, previousQty: mv.previousQty, newQty: mv.newQty, reason: `${reasonType}: ${notes}` },
+      createdAt: mv.createdAt,
     });
   });
 
-  // Direct live Firestore write if online
-  if (typeof navigator !== 'undefined' && navigator.onLine) {
-    try {
-      await setDoc(
-        doc(firestore, 'items', itemId),
-        { quantity: finalQty, updatedAt: now },
-        { merge: true }
-      );
-    } catch (fErr) {
-      console.warn('Direct Firestore stock adjust write notice:', fErr);
-    }
-  }
-
+  scheduleSync();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
   }
-
   return finalQty;
 }
 
-// Background Sync Queue Processor
-export async function processSyncQueue(): Promise<{ synced: number; remaining: number }> {
-  if (!navigator.onLine) {
-    const count = await db.syncQueue.where('status').equals('pending').count();
-    return { synced: 0, remaining: count };
-  }
-
-  const pendingItems = await db.syncQueue
-    .where('status')
-    .equals('pending')
-    .limit(50)
-    .toArray();
-
-  if (pendingItems.length === 0) {
-    return { synced: 0, remaining: 0 };
-  }
-
-  let syncedCount = 0;
-  for (const item of pendingItems) {
-    try {
-      await db.syncQueue.update(item.id, { status: 'syncing' });
-
-      // Sync to live Firestore database
-      if (item.entity === 'sale' && item.payload?.id) {
-        await setDoc(doc(firestore, 'sales', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
-        await db.sales.update(item.payload.id, { syncedAt: Date.now() });
-      } else if (item.entity === 'item' && item.payload?.id) {
-        if (item.action === 'delete') {
-          await deleteDoc(doc(firestore, 'items', item.payload.id));
-        } else {
-          await setDoc(doc(firestore, 'items', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
-        }
-      } else if (item.entity === 'withdrawal' && item.payload?.id) {
-        await setDoc(doc(firestore, 'withdrawals', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
-      } else if (item.entity === 'import' && item.payload?.id) {
-        await setDoc(doc(firestore, 'imports', item.payload.id), sanitizeForFirestore(item.payload), { merge: true });
-      }
-
-      await db.syncQueue.update(item.id, {
-        status: 'synced',
-        attempts: item.attempts + 1,
-      });
-      syncedCount++;
-    } catch (err: any) {
-      await db.syncQueue.update(item.id, {
-        status: 'failed',
-        attempts: item.attempts + 1,
-        lastError: err?.message || 'Sync error',
-      });
-    }
-  }
-
-  const remaining = await db.syncQueue.where('status').equals('pending').count();
-  return { synced: syncedCount, remaining };
-}
-
-// Bulk sync all shop items and import records to Firestore (with optional catalog reconciliation)
+// Bulk sync all shop items and import records to Firestore
 export async function syncAllInventoryToFirestore(
   shopId: string,
-  replaceCatalog = false
+  _replaceCatalog = false
 ): Promise<{ count: number; error?: string }> {
-  if (!navigator.onLine) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return { count: 0, error: 'Device is offline' };
   }
 
   try {
     const allItems = await db.items.where('shopId').equals(shopId).toArray();
-    const localItemIds = new Set(allItems.map((i) => i.id));
-
-    // If replaceCatalog is true (e.g. after CSV import or manual sync), prune any old items from Firestore
-    if (replaceCatalog) {
-      try {
-        const snap = await getDocs(collection(firestore, 'items'));
-        for (const docSnap of snap.docs) {
-          if (!localItemIds.has(docSnap.id)) {
-            await deleteDoc(docSnap.ref);
-          }
-        }
-      } catch (err) {
-        console.warn('Notice pruning old Firestore items:', err);
-      }
+    for (const it of allItems) {
+      await pushItem(it, true);
     }
 
-    if (allItems.length > 0) {
-      const batchSize = 400;
-      for (let i = 0; i < allItems.length; i += batchSize) {
-        const chunk = allItems.slice(i, i + batchSize);
-        const batch = writeBatch(firestore);
-        for (const it of chunk) {
-          batch.set(doc(firestore, 'items', it.id), sanitizeForFirestore(it), { merge: true });
-        }
-        await batch.commit();
-      }
-    }
-
-    // Touch shop doc in Firestore so other devices detect the new catalog update
     try {
       const shopRef = doc(firestore, 'shops', shopId || 'shop-electrical-01');
       await setDoc(shopRef, { lastInventoryUpdated: Date.now() }, { merge: true });
@@ -648,62 +541,48 @@ export async function pullInventoryFromFirestore(shopId: string): Promise<{ pull
 
   try {
     const targetShopId = shopId || 'shop-electrical-01';
-
-    // 1. Check shop document for cloud purge commands
-    try {
-      const shopSnap = await getDoc(doc(firestore, 'shops', targetShopId));
-      if (shopSnap.exists()) {
-        const shopData = shopSnap.data();
-        const cloudPurgedAt = shopData?.lastInventoryPurgedAt || 0;
-        const localPurgedAt = parseInt(localStorage.getItem('shopledger_last_purged_at') || '0', 10);
-        if (cloudPurgedAt > localPurgedAt) {
-          // Cloud purge was performed by owner! Clear local dummy/stale records
-          await db.items.clear();
-          await db.sales.clear();
-          await db.stockMovements.clear();
-          await db.imports.clear();
-          localStorage.setItem('shopledger_last_purged_at', cloudPurgedAt.toString());
-        }
-      }
-    } catch (checkErr) {
-      console.warn('Could not check purge status:', checkErr);
-    }
-
-    // 2. Fetch all items from Firestore
     const itemsCol = collection(firestore, 'items');
-    let snap = await getDocs(query(itemsCol, where('shopId', '==', targetShopId)));
-    if (snap.empty) {
-      snap = await getDocs(itemsCol);
-    }
+    const snap = await getDocs(query(itemsCol, where('shopId', '==', targetShopId)));
 
     if (snap.empty) {
-      const locCount = await db.items.count();
-      if (locCount > 0) {
-        await db.items.clear();
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
-        }
+      // Cloud has no items yet: populate Firestore from local catalog so cloud has correct stock
+      const localCount = await db.items.where('shopId').equals(targetShopId).count();
+      if (localCount > 0) {
+        await syncAllInventoryToFirestore(targetShopId, false);
       }
-      return { pulled: 0, removed: locCount };
+      return { pulled: 0, removed: 0 };
     }
 
+    const pending = await pendingDeltaByItem();
     const cloudItems: Item[] = [];
-    const cloudItemIds = new Set<string>();
 
     for (const d of snap.docs) {
-      const data = d.data() as Item;
+      const data = d.data() as Item & { isDeleted?: boolean };
+      if (data?.isDeleted) {
+        await db.items.delete(d.id);
+        continue;
+      }
       if (data && data.name) {
-        const itemObj: Item = {
+        const localItem = await db.items.get(d.id);
+        const cloudQuantity = Number(data.quantity) || 0;
+        const pendingDelta = pending.get(d.id) ?? 0;
+
+        // If local item was updated in the last 4 seconds, keep local quantity to avoid sale race condition
+        const isRecentlyModifiedLocally = localItem && (Date.now() - (localItem.updatedAt || 0) < 4000);
+        const finalQuantity = isRecentlyModifiedLocally
+          ? localItem.quantity
+          : Math.max(0, cloudQuantity + pendingDelta);
+
+        cloudItems.push({
           ...data,
           id: d.id,
           shopId: data.shopId || targetShopId,
           costPrice: Number(data.costPrice) || 0,
           sellingPrice: Number(data.sellingPrice) || 0,
-          quantity: Number(data.quantity) || 0,
+          quantity: finalQuantity,
           archived: Boolean(data.archived),
-        };
-        cloudItems.push(itemObj);
-        cloudItemIds.add(d.id);
+          updatedAt: Math.max(Number(data.updatedAt) || 0, localItem?.updatedAt || 0),
+        });
       }
     }
 
@@ -711,31 +590,18 @@ export async function pullInventoryFromFirestore(shopId: string): Promise<{ pull
       await db.items.bulkPut(cloudItems);
     }
 
-    // 3. Remove local items that were deleted in Cloud Firestore (skipping pending local items)
-    let removedCount = 0;
-    const localItems = await db.items.toArray();
-    const pendingQueueItems = await db.syncQueue.where('entity').equals('item').toArray();
-    const pendingIds = new Set(pendingQueueItems.map((q) => q.payload?.id).filter(Boolean));
-    for (const loc of localItems) {
-      if (!cloudItemIds.has(loc.id) && !pendingIds.has(loc.id)) {
-        await db.items.delete(loc.id);
-        removedCount++;
-      }
-    }
-
-    // Notify UI components
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
     }
 
-    return { pulled: cloudItems.length, removed: removedCount };
+    return { pulled: cloudItems.length, removed: 0 };
   } catch (err) {
     console.warn('Pull inventory notice (offline fallback active):', err);
     return { pulled: 0, removed: 0 };
   }
 }
 
-// Real-time listener for Firestore items so all connected seller devices update immediately
+// Real-time listener for Firestore items
 export function subscribeToCloudInventory(shopId: string, onChange?: () => void): () => void {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return () => {};
@@ -743,56 +609,48 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
 
   try {
     const targetShopId = shopId || 'shop-electrical-01';
-    const itemsCol = collection(firestore, 'items');
+    const q = query(collection(firestore, 'items'), where('shopId', '==', targetShopId));
     const unsub = onSnapshot(
-      itemsCol,
+      q,
       async (snap) => {
         try {
-          if (snap.empty) {
-            return;
-          }
+          if (snap.empty) return;
 
+          const pending = await pendingDeltaByItem();
           const cloudItems: Item[] = [];
-          const cloudIds = new Set<string>();
+
           for (const d of snap.docs) {
-            const data = d.data() as Item;
+            const data = d.data() as Item & { isDeleted?: boolean };
+            if (data?.isDeleted) {
+              await db.items.delete(d.id);
+              continue;
+            }
             if (data && data.name) {
+              const localItem = await db.items.get(d.id);
+              const cloudQuantity = Number(data.quantity) || 0;
+              const pendingDelta = pending.get(d.id) ?? 0;
+
+              // Do not let a slower incoming snapshot overwrite an immediate local sale within 4s
+              const isRecentlyModifiedLocally = localItem && (Date.now() - (localItem.updatedAt || 0) < 4000);
+              const finalQuantity = isRecentlyModifiedLocally
+                ? localItem.quantity
+                : Math.max(0, cloudQuantity + pendingDelta);
+
               cloudItems.push({
                 ...data,
                 id: d.id,
                 shopId: data.shopId || targetShopId,
                 costPrice: Number(data.costPrice) || 0,
                 sellingPrice: Number(data.sellingPrice) || 0,
-                quantity: Number(data.quantity) || 0,
+                quantity: finalQuantity,
                 archived: Boolean(data.archived),
+                updatedAt: Math.max(Number(data.updatedAt) || 0, localItem?.updatedAt || 0),
               });
-              cloudIds.add(d.id);
-            } else if (data && data.quantity !== undefined) {
-              const existing = await db.items.get(d.id);
-              if (existing) {
-                await db.items.update(d.id, {
-                  quantity: Number(data.quantity) || 0,
-                  updatedAt: Date.now(),
-                });
-              }
-              cloudIds.add(d.id);
             }
           }
 
           if (cloudItems.length > 0) {
             await db.items.bulkPut(cloudItems);
-          }
-
-          // Clean local items not in cloud only if cloud has verified catalog items and not pending in queue
-          if (cloudIds.size > 0) {
-            const localItems = await db.items.toArray();
-            const pendingQueueItems = await db.syncQueue.where('entity').equals('item').toArray();
-            const pendingIds = new Set(pendingQueueItems.map((q) => q.payload?.id).filter(Boolean));
-            for (const loc of localItems) {
-              if (!cloudIds.has(loc.id) && !pendingIds.has(loc.id)) {
-                await db.items.delete(loc.id);
-              }
-            }
           }
 
           if (typeof window !== 'undefined') {
@@ -813,7 +671,7 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
   }
 }
 
-// Real-time listener for Firestore sales so transactions & void status reflect across all devices simultaneously
+// Real-time listener for Firestore sales
 export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]) => void): () => void {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return () => {};
@@ -829,9 +687,10 @@ export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]
           for (const d of snap.docs) {
             const data = d.data() as Sale;
             if (data && data.lines) {
-              cloudSales.push({
+              const saleId = d.id;
+              const cloudSale: Sale = {
                 ...data,
-                id: d.id,
+                id: saleId,
                 shopId: data.shopId || shopId || 'shop-electrical-01',
                 subtotal: Number(data.subtotal) || Number(data.total) || 0,
                 total: Number(data.total) || 0,
@@ -840,17 +699,14 @@ export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]
                 voidedAt: data.voidedAt,
                 voidedBy: data.voidedBy,
                 createdAtClient: Number(data.createdAtClient) || Date.now(),
-              });
+              };
+              cloudSales.push(cloudSale);
+              await db.sales.put(cloudSale);
             }
-          }
-
-          if (cloudSales.length > 0) {
-            await db.sales.bulkPut(cloudSales);
           }
 
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
-            window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
           }
           onChange?.(cloudSales);
         } catch (err) {
@@ -875,12 +731,14 @@ export async function pullSalesFromFirestore(shopId?: string): Promise<{ pulled:
     const salesCol = collection(firestore, 'sales');
     const snap = await getDocs(salesCol);
     const cloudSales: Sale[] = [];
+
     for (const d of snap.docs) {
       const data = d.data() as Sale;
       if (data && data.lines) {
-        cloudSales.push({
+        const saleId = d.id;
+        const cloudSale: Sale = {
           ...data,
-          id: d.id,
+          id: saleId,
           shopId: data.shopId || shopId || 'shop-electrical-01',
           subtotal: Number(data.subtotal) || Number(data.total) || 0,
           total: Number(data.total) || 0,
@@ -889,17 +747,14 @@ export async function pullSalesFromFirestore(shopId?: string): Promise<{ pulled:
           voidedAt: data.voidedAt,
           voidedBy: data.voidedBy,
           createdAtClient: Number(data.createdAtClient) || Date.now(),
-        });
+        };
+        cloudSales.push(cloudSale);
+        await db.sales.put(cloudSale);
       }
-    }
-
-    if (cloudSales.length > 0) {
-      await db.sales.bulkPut(cloudSales);
     }
 
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
-      window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
     }
 
     return { pulled: cloudSales.length };
@@ -1114,9 +969,9 @@ export function subscribeToCloudUsers(onChange?: (users: User[]) => void): () =>
                 shopId: data.shopId || 'shop-electrical-01',
                 name: data.name || emailLower.split('@')[0],
                 email: data.email,
-                role: data.role || (emailLower === 'rajifarrid@gmail.com' ? 'owner' : 'seller'),
+                role: data.role || (emailLower === 'rajifarrid@gmail.com' || emailLower === 'wisdomosborn65@gmail.com' ? 'owner' : 'seller'),
                 active: data.active !== false,
-                deviceCode: data.deviceCode || 'D01',
+                deviceCode: data.deviceCode || (emailLower === 'abuyahwisdomosborn@gmail.com' ? 'D02' : 'D01'),
                 pinHash: data.pinHash || '1234',
                 createdAt: data.createdAt || Date.now(),
               };
@@ -1129,10 +984,20 @@ export function subscribeToCloudUsers(onChange?: (users: User[]) => void): () =>
             await db.users.bulkPut(cloudUsers);
           }
 
+          // Protect designated accounts from deletion during Firestore diffing
+          const isProtectedAccount = (em?: string) => {
+            const l = (em || '').toLowerCase().trim();
+            return (
+              l === 'rajifarrid@gmail.com' ||
+              l === 'wisdomosborn65@gmail.com' ||
+              l === 'abuyahwisdomosborn@gmail.com'
+            );
+          };
+
           // Remove any local non-owner user deleted from Firestore
           const localUsers = await db.users.toArray();
           for (const loc of localUsers) {
-            if (loc.email?.toLowerCase() !== 'rajifarrid@gmail.com' && !cloudIds.has(loc.uid)) {
+            if (!isProtectedAccount(loc.email) && !cloudIds.has(loc.uid)) {
               await db.users.delete(loc.uid);
             }
           }

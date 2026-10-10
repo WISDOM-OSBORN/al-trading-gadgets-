@@ -62,7 +62,7 @@ export function sanitizeForFirestore<T>(data: T): T {
   return data;
 }
 
-// Business Name & Pre-configured Admin Accounts
+// Business Name & Pre-configured Admin and Staff Accounts
 export const BUSINESS_NAME = 'AL-Q ELECTRICALS';
 
 export const DESIGNATED_USERS: Record<
@@ -73,6 +73,16 @@ export const DESIGNATED_USERS: Record<
     name: 'Raji Farrid',
     role: 'owner',
     deviceCode: 'D01',
+  },
+  'wisdomosborn65@gmail.com': {
+    name: 'Wisdom Osborn',
+    role: 'owner',
+    deviceCode: 'D01',
+  },
+  'abuyahwisdomosborn@gmail.com': {
+    name: 'Abuyah Wisdom Osborn',
+    role: 'seller',
+    deviceCode: 'D02',
   },
 };
 
@@ -189,23 +199,26 @@ export async function authenticateRegisteredUser(
     };
   }
 
-  // 1. Check if designated owner (rajifarrid@gmail.com)
+  // 1. Check if designated team member (Raji Farrid, Wisdom Osborn, Abuyah Wisdom Osborn)
   const designated = DESIGNATED_USERS[normalizedEmail];
   if (designated) {
-    const ownerUid = customUid || 'user-rajifarrid';
-    const defaultOwnerHash = await hashPin('1234');
-    const ownerUser: User = {
-      uid: ownerUid,
-      shopId: 'shop-electrical-01',
+    const fallbackUid = `user-${normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const userUid = customUid || fallbackUid;
+    const localUser = await db.users.where('email').equalsIgnoreCase(normalizedEmail).first();
+    const defaultHash = await hashPin('1234');
+    const matchedUser: User = {
+      uid: localUser?.uid || userUid,
+      shopId: localUser?.shopId || 'shop-electrical-01',
       name: designated.name,
       email: normalizedEmail,
       role: designated.role,
       active: true,
       deviceCode: designated.deviceCode,
-      pinHash: defaultOwnerHash,
-      createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      pinHash: localUser?.pinHash || defaultHash,
+      createdAt: localUser?.createdAt || (Date.now() - 30 * 24 * 60 * 60 * 1000),
     };
-    return { success: true, user: ownerUser };
+    await db.users.put(matchedUser);
+    return { success: true, user: matchedUser };
   }
 
   // 2. Look up user in Firestore 'users' collection
@@ -368,27 +381,29 @@ export async function authenticateWorkerWithEmailAndPin(
     };
   }
 
-  // Check if owner logging in via PIN
-  if (normalizedEmail === 'rajifarrid@gmail.com') {
-    const ownerLocal = await db.users.where('email').equalsIgnoreCase('rajifarrid@gmail.com').first();
-    const isOwnerMatch = await verifyPin(trimmedPin, ownerLocal?.pinHash || ownerLocal?.pin || '1234');
-    if (isOwnerMatch) {
-      const ownerHash = ownerLocal?.pinHash || (await hashPin(trimmedPin));
-      const ownerUser: User = {
-        uid: ownerLocal?.uid || 'user-rajifarrid',
-        shopId: 'shop-electrical-01',
-        name: 'Raji Farrid',
-        email: 'rajifarrid@gmail.com',
-        role: 'owner',
+  // Check if designated team member logging in via PIN
+  if (DESIGNATED_USERS[normalizedEmail]) {
+    const designated = DESIGNATED_USERS[normalizedEmail];
+    const userLocal = await db.users.where('email').equalsIgnoreCase(normalizedEmail).first();
+    const isMatch = await verifyPin(trimmedPin, userLocal?.pinHash || userLocal?.pin || '1234');
+    if (isMatch) {
+      const pinHash = userLocal?.pinHash || (await hashPin(trimmedPin));
+      const fallbackUid = `user-${normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      const userObj: User = {
+        uid: userLocal?.uid || fallbackUid,
+        shopId: userLocal?.shopId || 'shop-electrical-01',
+        name: designated.name,
+        email: normalizedEmail,
+        role: designated.role,
         active: true,
-        deviceCode: 'D01',
-        pinHash: ownerHash,
-        createdAt: ownerLocal?.createdAt || (Date.now() - 30 * 24 * 60 * 60 * 1000),
+        deviceCode: designated.deviceCode,
+        pinHash,
+        createdAt: userLocal?.createdAt || (Date.now() - 30 * 24 * 60 * 60 * 1000),
       };
-      await db.users.put(ownerUser);
-      return { success: true, user: ownerUser };
+      await db.users.put(userObj);
+      return { success: true, user: userObj };
     } else {
-      return { success: false, error: 'Incorrect Owner PIN code.' };
+      return { success: false, error: 'Incorrect 4-digit security PIN.' };
     }
   }
 

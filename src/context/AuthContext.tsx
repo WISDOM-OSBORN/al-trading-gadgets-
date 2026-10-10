@@ -46,11 +46,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Initialize DB and authenticate active user session
   useEffect(() => {
+    let isMounted = true;
+    const watchdogTimer = setTimeout(() => {
+      if (isMounted) {
+        setIsLoading(false);
+      }
+    }, 1000);
+
     async function loadAuth() {
       try {
         await initializeDatabase();
+        if (!isMounted) return;
+
         const shop = await db.shops.toCollection().first();
-        if (shop) {
+        if (shop && isMounted) {
           setCurrentShop(shop);
         }
 
@@ -67,14 +76,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         // Only authenticate if a valid active session is saved. NEVER auto-login as owner on refresh!
-        if (user && user.active === true) {
-          setCurrentUser(user);
-        } else {
-          setCurrentUser(null);
+        if (isMounted) {
+          if (user && user.active === true) {
+            setCurrentUser(user);
+          } else {
+            setCurrentUser(null);
+          }
+          setIsLoading(false);
         }
-
-        // Instant UI unlock: Render local data immediately (<20ms)
-        setIsLoading(false);
 
         // Sync remote user list in background without blocking screen render
         syncUsersFromFirestore().catch(() => {});
@@ -82,17 +91,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Sync latest shop profile & inventory from cloud in background
         if (shop) {
           pullShopFromFirestore(shop.id).then((freshShop) => {
-            if (freshShop) setCurrentShop(freshShop);
+            if (freshShop && isMounted) setCurrentShop(freshShop);
           }).catch(() => {});
           pullInventoryFromFirestore(shop.id).catch(() => {});
         }
       } catch (err) {
         console.error('Failed to initialize auth:', err);
       } finally {
-        setIsLoading(false);
+        clearTimeout(watchdogTimer);
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     }
     loadAuth();
+
+    return () => {
+      isMounted = false;
+      clearTimeout(watchdogTimer);
+    };
   }, []);
 
   // Real-time synchronization for shop settings & user accounts across all devices

@@ -45,6 +45,8 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
   // Edit / Add Modal
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Partial<Item> | null>(null);
+  const [originalQuantity, setOriginalQuantity] = useState<number>(0);
+  const [formError, setFormError] = useState<string | null>(null);
 
   // Stock Adjustment Modal
   const [adjustingItem, setAdjustingItem] = useState<Item | null>(null);
@@ -113,6 +115,13 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
   const handleSaveItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentShop || !editingItem || !editingItem.name || !editingItem.sellingPrice) return;
+    setFormError(null);
+
+    const formQty = Number(editingItem.quantity);
+    if (!Number.isInteger(formQty) || formQty < 0) {
+      setFormError('Quantity must be a whole number, 0 or more.');
+      return;
+    }
 
     const now = Date.now();
     const sku =
@@ -121,6 +130,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
 
     if (editingItem.id) {
       // Update
+      const fresh = await db.items.get(editingItem.id);
       const updatedItem: Item = {
         ...editingItem,
         id: editingItem.id,
@@ -132,7 +142,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
         brand: editingItem.brand?.trim() || '',
         costPrice: Number(editingItem.costPrice) || 0,
         sellingPrice: Number(editingItem.sellingPrice) || 0,
-        quantity: Number(editingItem.quantity) || 0,
+        quantity: fresh?.quantity ?? 0,
         reorderLevel: Number(editingItem.reorderLevel) || 5,
         supplier: editingItem.supplier?.trim() || undefined,
         description: editingItem.description?.trim() || undefined,
@@ -141,7 +151,20 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
         updatedAt: now,
       };
 
-      await saveItemAcrossDevices(updatedItem);
+      await saveItemAcrossDevices(updatedItem); // metadata only; cloud push strips quantity
+
+      const delta = formQty - originalQuantity; // what the user actually changed
+      if (delta !== 0) {
+        await adjustStock({
+          shopId: currentShop.id,
+          itemId: updatedItem.id,
+          qtyChange: delta,
+          reasonType: 'correction',
+          notes: 'Edited in inventory form',
+          userId: currentUser!.uid,
+          userName: currentUser!.name,
+        });
+      }
 
       await db.auditLogs.add({
         id: `audit-${now}`,
@@ -155,7 +178,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
         createdAt: now,
       });
     } else {
-      // Create new
+      // Create new: starts at 0, stock arrives via movements
       const newItemId = `item-${now}-${Math.random().toString(36).substring(2, 7)}`;
       const newItem: Item = {
         id: newItemId,
@@ -167,7 +190,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
         brand: editingItem.brand?.trim() || '',
         costPrice: Number(editingItem.costPrice) || 0,
         sellingPrice: Number(editingItem.sellingPrice) || 0,
-        quantity: Number(editingItem.quantity) || 0,
+        quantity: 0,
         reorderLevel: Number(editingItem.reorderLevel) || 5,
         supplier: editingItem.supplier?.trim() || undefined,
         description: editingItem.description?.trim() || undefined,
@@ -178,22 +201,15 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
 
       await saveItemAcrossDevices(newItem);
 
-      // Record initial movement
-      if (newItem.quantity > 0) {
-        await db.stockMovements.add({
-          id: `sm-${now}`,
+      if (formQty > 0) {
+        await adjustStock({
           shopId: currentShop.id,
           itemId: newItemId,
-          itemName: newItem.name,
-          itemSku: newItem.sku,
-          type: 'restock',
-          qtyChange: newItem.quantity,
-          previousQty: 0,
-          newQty: newItem.quantity,
-          reason: 'Initial stock entry',
-          userId: currentUser?.uid || 'owner',
-          userName: currentUser?.name || 'Owner',
-          createdAt: now,
+          qtyChange: formQty,
+          reasonType: 'restock',
+          notes: 'Initial stock',
+          userId: currentUser!.uid,
+          userName: currentUser!.name,
         });
       }
 
@@ -212,6 +228,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
 
     setIsEditModalOpen(false);
     setEditingItem(null);
+    setOriginalQuantity(0);
     await loadItems();
   };
 
@@ -402,6 +419,8 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                 quantity: 10,
                 reorderLevel: 5,
               });
+              setOriginalQuantity(10);
+              setFormError(null);
               setIsEditModalOpen(true);
             }}
             className="flex-1 sm:flex-initial min-h-[40px] px-4 py-1.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
@@ -589,6 +608,8 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
                               <button
                                 onClick={() => {
                                   setEditingItem({ ...item });
+                                  setOriginalQuantity(item.quantity ?? 0);
+                                  setFormError(null);
                                   setIsEditModalOpen(true);
                                 }}
                                 className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition cursor-pointer"
@@ -1005,6 +1026,12 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
             </div>
 
             <form onSubmit={handleSaveItem} className="space-y-3 text-xs">
+              {formError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-300 text-xs flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{formError}</span>
+                </div>
+              )}
               <div>
                 <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
                   Gadget Name *

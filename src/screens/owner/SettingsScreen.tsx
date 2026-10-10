@@ -194,22 +194,49 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
       cleanUsers.push(u);
     }
 
-    // Ensure Raji Farrid (owner) is present
-    if (!seenEmails.has('rajifarrid@gmail.com')) {
-      const defaultOwnerHash = await hashPin('1234');
-      const raji: User = {
+    // Ensure designated team accounts are present
+    const defaultTeam = [
+      {
+        uid: 'user-wisdomosborn',
+        name: 'Wisdom Osborn',
+        email: 'wisdomosborn65@gmail.com',
+        role: 'owner' as const,
+        deviceCode: 'D01',
+      },
+      {
         uid: 'user-rajifarrid',
-        shopId: currentShop.id,
         name: 'Raji Farrid',
         email: 'rajifarrid@gmail.com',
-        role: 'owner',
-        active: true,
+        role: 'owner' as const,
         deviceCode: 'D01',
-        pinHash: defaultOwnerHash,
-        createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
-      };
-      await db.users.put(raji);
-      cleanUsers.unshift(raji);
+      },
+      {
+        uid: 'user-abuyahwisdomosborn',
+        name: 'Abuyah Wisdom Osborn',
+        email: 'abuyahwisdomosborn@gmail.com',
+        role: 'seller' as const,
+        deviceCode: 'D02',
+      },
+    ];
+
+    for (const member of defaultTeam) {
+      if (!seenEmails.has(member.email)) {
+        const defaultHash = await hashPin('1234');
+        const userObj: User = {
+          uid: member.uid,
+          shopId: currentShop.id,
+          name: member.name,
+          email: member.email,
+          role: member.role,
+          active: true,
+          deviceCode: member.deviceCode,
+          pinHash: defaultHash,
+          createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+        };
+        await db.users.put(userObj);
+        cleanUsers.push(userObj);
+        seenEmails.add(member.email);
+      }
     }
 
     // Sort: Store Owner at the top, then other staff accounts sorted alphabetically

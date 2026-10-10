@@ -105,13 +105,18 @@ export const SellScreen: React.FC = () => {
     setErrorMessage(null);
   };
 
-  // Adjust quantity
+  // Adjust quantity: integer-only, minimum 0
   const handleQtyChange = (qty: number | '') => {
     if (qty === '') {
       setSellQuantity('');
       return;
     }
-    const validQty = Math.max(0, qty);
+    const n = Number(qty);
+    if (!Number.isFinite(n)) {
+      setSellQuantity(0);
+      return;
+    }
+    const validQty = Math.max(0, Math.floor(n));
     setSellQuantity(validQty);
   };
 
@@ -119,24 +124,34 @@ export const SellScreen: React.FC = () => {
   const handleRecordSale = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedItem || !currentUser || !currentShop) return;
-    const numQty = typeof sellQuantity === 'number' ? sellQuantity : parseInt(sellQuantity, 10) || 0;
-    if (numQty <= 0) {
-      setErrorMessage('Quantity must be at least 1.');
-      return;
-    }
-
-    const calculatedTotal = Number((numQty * selectedItem.sellingPrice).toFixed(2));
-
-    if (!currentShop.settings.allowNegativeStock && selectedItem.quantity < numQty) {
-      setErrorMessage(
-        `Insufficient stock for "${selectedItem.name}". Only ${selectedItem.quantity} left in stock.`
-      );
+    const numQty = typeof sellQuantity === 'number' ? sellQuantity : Number(sellQuantity);
+    if (!Number.isInteger(numQty) || numQty < 1) {
+      setErrorMessage('Quantity must be a whole number of at least 1.');
       return;
     }
 
     try {
       setIsSubmitting(true);
       setErrorMessage(null);
+
+      // Verify fresh current stock directly from local Dexie database
+      const freshItem = await db.items.get(selectedItem.id);
+      if (!freshItem) {
+        setErrorMessage(`Item "${selectedItem.name}" not found.`);
+        setIsSubmitting(false);
+        return;
+      }
+
+      const currentStock = freshItem.quantity;
+      if (!currentShop.settings.allowNegativeStock && currentStock < numQty) {
+        setErrorMessage(
+          `Insufficient stock for "${freshItem.name}". Only ${currentStock} left in stock.`
+        );
+        setIsSubmitting(false);
+        return;
+      }
+
+      const calculatedTotal = Number((numQty * freshItem.sellingPrice).toFixed(2));
 
       const saleRecord = await recordSale({
         shopId: currentShop.id,
@@ -147,12 +162,12 @@ export const SellScreen: React.FC = () => {
         allowNegativeStock: currentShop.settings.allowNegativeStock,
         lines: [
           {
-            itemId: selectedItem.id,
-            name: selectedItem.name,
-            sku: selectedItem.sku,
+            itemId: freshItem.id,
+            name: freshItem.name,
+            sku: freshItem.sku,
             qty: numQty,
-            unitPrice: selectedItem.sellingPrice,
-            costPriceAtSale: selectedItem.costPrice,
+            unitPrice: freshItem.sellingPrice,
+            costPriceAtSale: freshItem.costPrice,
             discount: 0,
             lineTotal: calculatedTotal,
           },
@@ -161,7 +176,9 @@ export const SellScreen: React.FC = () => {
         total: calculatedTotal,
       });
 
-      const remaining = selectedItem.quantity - numQty;
+      const remainingStock = saleRecord.remainingStockAfterSale !== undefined
+        ? saleRecord.remainingStockAfterSale
+        : Math.max(0, currentStock - numQty);
 
       const timeString = new Date(saleRecord.createdAtClient).toLocaleTimeString('en-US', {
         hour: '2-digit',
@@ -173,10 +190,10 @@ export const SellScreen: React.FC = () => {
       setLastRecordedSale({
         invoiceNo: saleRecord.invoiceNo,
         time: timeString,
-        itemName: selectedItem.name,
+        itemName: freshItem.name,
         quantitySold: numQty,
         amount: calculatedTotal,
-        remainingStock: remaining,
+        remainingStock: remainingStock,
       });
 
       // Reset selection and close the popout box
@@ -378,10 +395,13 @@ export const SellScreen: React.FC = () => {
                                 <span className="text-[11px] text-slate-500">
                                   Leaves{' '}
                                   <strong className="text-slate-800 dark:text-slate-200">
-                                    {item.quantity -
-                                      (typeof sellQuantity === 'number'
-                                        ? sellQuantity
-                                        : parseInt(sellQuantity, 10) || 0)}
+                                    {Math.max(
+                                      0,
+                                      item.quantity -
+                                        (typeof sellQuantity === 'number'
+                                          ? sellQuantity
+                                          : parseInt(sellQuantity, 10) || 0)
+                                    )}
                                   </strong>{' '}
                                   in stock
                                 </span>

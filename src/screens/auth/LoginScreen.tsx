@@ -82,6 +82,80 @@ export const LoginScreen: React.FC = () => {
 
         {/* Login Form Container */}
         <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+          {/* Quick Profile Select */}
+          <div className="space-y-1">
+            <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+              Select Account or Enter Details:
+            </label>
+            <div className="grid grid-cols-1 gap-1.5 mb-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('wisdomosborn65@gmail.com');
+                  setPin('1234');
+                  setError(null);
+                }}
+                className={`p-2 rounded-xl text-left border text-[11px] transition cursor-pointer flex items-center justify-between ${
+                  email === 'wisdomosborn65@gmail.com'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 text-emerald-800 dark:text-emerald-200 font-bold ring-1 ring-emerald-500'
+                    : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                <div>
+                  <p className="font-bold">Wisdom Osborn</p>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400">wisdomosborn65@gmail.com</p>
+                </div>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                  Owner / Admin
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('rajifarrid@gmail.com');
+                  setPin('1234');
+                  setError(null);
+                }}
+                className={`p-2 rounded-xl text-left border text-[11px] transition cursor-pointer flex items-center justify-between ${
+                  email === 'rajifarrid@gmail.com'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 text-emerald-800 dark:text-emerald-200 font-bold ring-1 ring-emerald-500'
+                    : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                <div>
+                  <p className="font-bold">Raji Farrid</p>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400">rajifarrid@gmail.com</p>
+                </div>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                  Owner / Admin
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('abuyahwisdomosborn@gmail.com');
+                  setPin('1234');
+                  setError(null);
+                }}
+                className={`p-2 rounded-xl text-left border text-[11px] transition cursor-pointer flex items-center justify-between ${
+                  email === 'abuyahwisdomosborn@gmail.com'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 text-emerald-800 dark:text-emerald-200 font-bold ring-1 ring-emerald-500'
+                    : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                <div>
+                  <p className="font-bold">Abuyah Wisdom Osborn</p>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400">abuyahwisdomosborn@gmail.com</p>
+                </div>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                  Counter Staff
+                </span>
+              </button>
+            </div>
+          </div>
+
           <form onSubmit={handleEmailPinSubmit} className="space-y-3 text-xs">
             <div>
               <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
