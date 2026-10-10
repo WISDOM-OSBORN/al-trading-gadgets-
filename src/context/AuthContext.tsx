@@ -75,7 +75,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         }
 
-        // Only authenticate if a valid active session is saved. NEVER auto-login as owner on refresh!
+        // Auto-restore previous active session (Wisdom Osborn / AL-Q ELECTRICALS) unless explicitly logged out
+        const wasExplicitlyLoggedOut = localStorage.getItem('shopledger_explicit_logout') === 'true';
+        if (!user && !wasExplicitlyLoggedOut) {
+          const primaryAdmin = await db.users
+            .where('email')
+            .equalsIgnoreCase('wisdomosborn65@gmail.com')
+            .first();
+          if (primaryAdmin && primaryAdmin.active) {
+            user = primaryAdmin;
+            localStorage.setItem('shopledger_active_uid', primaryAdmin.uid);
+          } else {
+            const anyOwner = await db.users.where('role').equals('owner').first();
+            if (anyOwner && anyOwner.active) {
+              user = anyOwner;
+              localStorage.setItem('shopledger_active_uid', anyOwner.uid);
+            }
+          }
+        }
+
+        // Authenticate active user session and render UI
         if (isMounted) {
           if (user && user.active === true) {
             setCurrentUser(user);
@@ -180,6 +199,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await db.users.put(authRes.user);
       setCurrentUser(authRes.user);
       localStorage.setItem('shopledger_active_uid', authRes.user.uid);
+      localStorage.removeItem('shopledger_explicit_logout');
       setIsLocked(false);
 
       const shop = currentShop || await db.shops.toCollection().first();
@@ -205,6 +225,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await db.users.put(authRes.user);
       setCurrentUser(authRes.user);
       localStorage.setItem('shopledger_active_uid', authRes.user.uid);
+      localStorage.removeItem('shopledger_explicit_logout');
       setIsLocked(false);
 
       const shop = currentShop || await db.shops.toCollection().first();
@@ -236,6 +257,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await db.users.put(authRes.user);
       setCurrentUser(authRes.user);
       localStorage.setItem('shopledger_active_uid', authRes.user.uid);
+      localStorage.removeItem('shopledger_explicit_logout');
       setIsLocked(false);
 
       const shop = currentShop || await db.shops.toCollection().first();
@@ -280,6 +302,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = () => {
     localStorage.removeItem('shopledger_active_uid');
+    localStorage.setItem('shopledger_explicit_logout', 'true');
     signOutFirebase();
     setCurrentUser(null);
   };
