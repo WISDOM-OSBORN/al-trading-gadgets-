@@ -84,4 +84,18 @@ describe('quantity logic', () => {
     await db.syncQueue.update(first.id, { status: 'synced' });
     expect((await pendingDeltaByItem()).get('i1')).toBeDefined();
   });
+
+  it('skips movements already recorded in cloud recentMovementIds to prevent double deduction on multi-device', async () => {
+    await recordSale(sale(2));
+    const queueItems = await db.syncQueue.where('entity').equals('stockMovement').toArray();
+    expect(queueItems).toHaveLength(1);
+    const movementId = (queueItems[0].payload as any).id;
+
+    // Before cloud receives it, pendingDelta is -2
+    expect((await pendingDeltaByItem()).get('i1')).toBe(-2);
+
+    // When cloud snapshot contains this movementId in applied set, pending delta must be 0
+    const appliedSet = new Set([movementId]);
+    expect((await pendingDeltaByItem(appliedSet)).get('i1')).toBeUndefined();
+  });
 });

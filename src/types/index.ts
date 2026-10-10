@@ -58,6 +58,8 @@ export interface Item {
   photoUrl?: string;
   archived: boolean;
   isFavorite?: boolean;
+  lastMovementId?: string;
+  recentMovementIds?: string[];
   createdAt: number;
   updatedAt: number;
 }

@@ -84,11 +84,19 @@ async function pushStockMovement(m: StockMovement): Promise<void> {
 
     const itemSnap = await tx.get(itemRef);
     if (itemSnap.exists()) {
-      const currentCloudQty = Number(itemSnap.data()?.quantity) || 0;
+      const data = itemSnap.data() || {};
+      const currentCloudQty = Number(data.quantity) || 0;
       const targetQty = Math.max(0, currentCloudQty + m.qtyChange);
+      const existingRecent: string[] = Array.isArray(data.recentMovementIds) ? data.recentMovementIds : [];
+      const updatedRecent = [m.id, ...existingRecent.filter((id) => id !== m.id)].slice(0, 30);
       tx.set(
         itemRef,
-        { quantity: targetQty, updatedAt: m.createdAt, lastMovementId: m.id },
+        {
+          quantity: targetQty,
+          updatedAt: Date.now(),
+          lastMovementId: m.id,
+          recentMovementIds: updatedRecent,
+        },
         { merge: true }
       );
     } else {
@@ -101,7 +109,8 @@ async function pushStockMovement(m: StockMovement): Promise<void> {
             ...localItem,
             quantity: Math.max(0, m.newQty),
             lastMovementId: m.id,
-            updatedAt: m.createdAt,
+            recentMovementIds: [m.id],
+            updatedAt: Date.now(),
           })
         );
       }
@@ -109,14 +118,27 @@ async function pushStockMovement(m: StockMovement): Promise<void> {
   });
 }
 
-/** Pushes item and retains/updates full metadata and stock quantity. */
-export async function pushItem(item: Item, _seedQuantity = true): Promise<void> {
+/** Pushes item and retains/updates full metadata; preserves cloud stock quantity unless explicitly seeding. */
+export async function pushItem(item: Item, seedQuantity = false): Promise<void> {
   const ref = doc(firestore, 'items', item.id);
   const clean = sanitizeForFirestore(item) as Item;
   await runTransaction(firestore, async (tx) => {
     const snap = await tx.get(ref);
     if (snap.exists()) {
-      tx.set(ref, clean, { merge: true });
+      if (seedQuantity) {
+        tx.set(ref, clean, { merge: true });
+      } else {
+        const existingData = snap.data();
+        const { quantity, ...metadataWithoutQty } = clean;
+        tx.set(
+          ref,
+          {
+            ...metadataWithoutQty,
+            quantity: Number(existingData?.quantity) ?? clean.quantity,
+          },
+          { merge: true }
+        );
+      }
     } else {
       tx.set(ref, clean);
     }
@@ -504,7 +526,7 @@ export async function syncAllInventoryToFirestore(
   try {
     const allItems = await db.items.where('shopId').equals(shopId).toArray();
     for (const it of allItems) {
-      await pushItem(it, true);
+      await pushItem(it, _replaceCatalog);
     }
 
     try {
@@ -553,7 +575,12 @@ export async function pullInventoryFromFirestore(shopId: string): Promise<{ pull
       return { pulled: 0, removed: 0 };
     }
 
-    const pending = await pendingDeltaByItem();
+    const openQueue = await db.syncQueue
+      .where('entity')
+      .equals('stockMovement')
+      .filter((q) => q.status !== 'synced')
+      .toArray();
+
     const cloudItems: Item[] = [];
 
     for (const d of snap.docs) {
@@ -563,15 +590,26 @@ export async function pullInventoryFromFirestore(shopId: string): Promise<{ pull
         continue;
       }
       if (data && data.name) {
-        const localItem = await db.items.get(d.id);
         const cloudQuantity = Number(data.quantity) || 0;
-        const pendingDelta = pending.get(d.id) ?? 0;
 
-        // If local item was updated in the last 4 seconds, keep local quantity to avoid sale race condition
-        const isRecentlyModifiedLocally = localItem && (Date.now() - (localItem.updatedAt || 0) < 4000);
-        const finalQuantity = isRecentlyModifiedLocally
-          ? localItem.quantity
-          : Math.max(0, cloudQuantity + pendingDelta);
+        // Skip pending local movements already accounted for by the cloud
+        const recentApplied = new Set<string>();
+        if (data.lastMovementId) recentApplied.add(data.lastMovementId);
+        if (Array.isArray(data.recentMovementIds)) {
+          for (const movId of data.recentMovementIds) {
+            if (movId) recentApplied.add(movId);
+          }
+        }
+
+        let pendingDelta = 0;
+        for (const q of openQueue) {
+          const m = q.payload as StockMovement;
+          if (m && m.itemId === d.id && !recentApplied.has(m.id)) {
+            pendingDelta += m.qtyChange;
+          }
+        }
+
+        const finalQuantity = Math.max(0, cloudQuantity + pendingDelta);
 
         cloudItems.push({
           ...data,
@@ -581,7 +619,7 @@ export async function pullInventoryFromFirestore(shopId: string): Promise<{ pull
           sellingPrice: Number(data.sellingPrice) || 0,
           quantity: finalQuantity,
           archived: Boolean(data.archived),
-          updatedAt: Math.max(Number(data.updatedAt) || 0, localItem?.updatedAt || 0),
+          updatedAt: Number(data.updatedAt) || Date.now(),
         });
       }
     }
@@ -616,7 +654,12 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
         try {
           if (snap.empty) return;
 
-          const pending = await pendingDeltaByItem();
+          const openQueue = await db.syncQueue
+            .where('entity')
+            .equals('stockMovement')
+            .filter((q) => q.status !== 'synced')
+            .toArray();
+
           const cloudItems: Item[] = [];
 
           for (const d of snap.docs) {
@@ -626,15 +669,25 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
               continue;
             }
             if (data && data.name) {
-              const localItem = await db.items.get(d.id);
               const cloudQuantity = Number(data.quantity) || 0;
-              const pendingDelta = pending.get(d.id) ?? 0;
 
-              // Do not let a slower incoming snapshot overwrite an immediate local sale within 4s
-              const isRecentlyModifiedLocally = localItem && (Date.now() - (localItem.updatedAt || 0) < 4000);
-              const finalQuantity = isRecentlyModifiedLocally
-                ? localItem.quantity
-                : Math.max(0, cloudQuantity + pendingDelta);
+              const recentApplied = new Set<string>();
+              if (data.lastMovementId) recentApplied.add(data.lastMovementId);
+              if (Array.isArray(data.recentMovementIds)) {
+                for (const movId of data.recentMovementIds) {
+                  if (movId) recentApplied.add(movId);
+                }
+              }
+
+              let pendingDelta = 0;
+              for (const q of openQueue) {
+                const m = q.payload as StockMovement;
+                if (m && m.itemId === d.id && !recentApplied.has(m.id)) {
+                  pendingDelta += m.qtyChange;
+                }
+              }
+
+              const finalQuantity = Math.max(0, cloudQuantity + pendingDelta);
 
               cloudItems.push({
                 ...data,
@@ -644,7 +697,7 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
                 sellingPrice: Number(data.sellingPrice) || 0,
                 quantity: finalQuantity,
                 archived: Boolean(data.archived),
-                updatedAt: Math.max(Number(data.updatedAt) || 0, localItem?.updatedAt || 0),
+                updatedAt: Number(data.updatedAt) || Date.now(),
               });
             }
           }
@@ -773,9 +826,9 @@ export async function saveItemAcrossDevices(item: Item): Promise<void> {
   };
   await db.items.put(cleanItem);
 
-  if (navigator.onLine) {
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
     try {
-      await setDoc(doc(firestore, 'items', cleanItem.id), sanitizeForFirestore(cleanItem), { merge: true });
+      await pushItem(cleanItem, false);
     } catch (err) {
       console.warn('Immediate Firestore item save failed, queued for sync:', err);
       await db.syncQueue.add({

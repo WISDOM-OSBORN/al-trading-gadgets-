@@ -15,7 +15,7 @@ import {
 } from '../types';
 import { INITIAL_GADGETS, SEED_SHOP_ID } from './seedData';
 import { firestore } from './firebase';
-import { collection, getDocs, doc, deleteDoc, deleteField, setDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, deleteDoc, deleteField, setDoc, query, where } from 'firebase/firestore';
 import { hashPin } from '../utils/crypto';
 import { applyStockChangeTx, assertWholeNumber, newId } from './stock';
 import { scheduleSync } from './sync';
@@ -168,15 +168,48 @@ export async function initializeDatabase() {
   const currentItemCount = await db.items.count();
   const wasPurged = localStorage.getItem('shopledger_last_purged_at');
   if (currentItemCount === 0 && !wasPurged) {
-    const now = Date.now();
-    const itemRecords: Item[] = INITIAL_GADGETS.map((g, idx) => ({
-      ...g,
-      id: `item-${idx + 1}`,
-      shopId: targetShopId,
-      createdAt: now - 20 * 24 * 60 * 60 * 1000,
-      updatedAt: now,
-    }));
-    await db.items.bulkPut(itemRecords);
+    let cloudLoaded = false;
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      try {
+        const snap = await getDocs(query(collection(firestore, 'items'), where('shopId', '==', targetShopId)));
+        if (!snap.empty) {
+          const cloudItems: Item[] = [];
+          for (const d of snap.docs) {
+            const data = d.data() as Item & { isDeleted?: boolean };
+            if (!data?.isDeleted && data?.name) {
+              cloudItems.push({
+                ...data,
+                id: d.id,
+                shopId: data.shopId || targetShopId,
+                costPrice: Number(data.costPrice) || 0,
+                sellingPrice: Number(data.sellingPrice) || 0,
+                quantity: Number(data.quantity) || 0,
+                archived: Boolean(data.archived),
+                updatedAt: Number(data.updatedAt) || Date.now(),
+              });
+            }
+          }
+          if (cloudItems.length > 0) {
+            await db.items.bulkPut(cloudItems);
+            cloudLoaded = true;
+          }
+        }
+      } catch (err) {
+        console.warn('Could not pre-populate from cloud:', err);
+      }
+    }
+
+    if (!cloudLoaded) {
+      const now = Date.now();
+      const itemRecords: Item[] = INITIAL_GADGETS.map((g, idx) => ({
+        ...g,
+        id: `item-${idx + 1}`,
+        shopId: targetShopId,
+        createdAt: now - 20 * 24 * 60 * 60 * 1000,
+        updatedAt: now,
+      }));
+      await db.items.bulkPut(itemRecords);
+    }
   }
 
   // 5. Non-blocking asynchronous cloud hydration in background

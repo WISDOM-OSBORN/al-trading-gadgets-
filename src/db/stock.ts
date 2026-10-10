@@ -87,7 +87,7 @@ export async function applyStockChangeTx(input: StockChangeInput): Promise<Stock
 }
 
 /** Sum of not-yet-confirmed local deltas per item. Used when merging cloud quantities. */
-export async function pendingDeltaByItem(): Promise<Map<string, number>> {
+export async function pendingDeltaByItem(appliedMovementIds?: Set<string>): Promise<Map<string, number>> {
   const open = await db.syncQueue
     .where('entity')
     .equals('stockMovement')
@@ -96,7 +96,12 @@ export async function pendingDeltaByItem(): Promise<Map<string, number>> {
   const map = new Map<string, number>();
   for (const q of open) {
     const m = q.payload as StockMovement;
-    map.set(m.itemId, (map.get(m.itemId) || 0) + m.qtyChange);
+    if (m && m.itemId) {
+      if (appliedMovementIds && appliedMovementIds.has(m.id)) {
+        continue; // Already factored into the cloud document's quantity
+      }
+      map.set(m.itemId, (map.get(m.itemId) || 0) + m.qtyChange);
+    }
   }
   return map;
 }
