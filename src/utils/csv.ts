@@ -252,14 +252,25 @@ export async function executeBatchImport(params: {
   if (typeof navigator !== 'undefined' && navigator.onLine) {
     try {
       const snap = await getDocs(query(collection(firestore, 'items'), where('shopId', '==', shopId)));
+      const cloudOnlyItemsToPut: Item[] = [];
       for (const d of snap.docs) {
         const cItem = d.data() as Item;
         if (cItem?.sku && !cItem.isDeleted) {
           const upperSku = cItem.sku.toUpperCase();
           if (!existingBySku.has(upperSku)) {
-            existingBySku.set(upperSku, { ...cItem, id: d.id });
+            const fullItem: Item = {
+              ...cItem,
+              id: d.id,
+              shopId: cItem.shopId || shopId,
+              quantity: Number(cItem.quantity) || 0,
+            };
+            existingBySku.set(upperSku, fullItem);
+            cloudOnlyItemsToPut.push(fullItem);
           }
         }
+      }
+      if (cloudOnlyItemsToPut.length > 0) {
+        await db.items.bulkPut(cloudOnlyItemsToPut);
       }
     } catch (e) {
       console.warn('Could not check remote inventory before CSV import:', e);
@@ -275,7 +286,7 @@ export async function executeBatchImport(params: {
     await db.transaction('rw', [db.items, db.stockMovements, db.syncQueue], async () => {
       for (const row of batch) {
         try {
-          const existing = existingBySku.get(row.sku);
+          const existing = existingBySku.get(row.sku.toUpperCase());
 
           if (existing) {
             if (duplicateMode === 'skip') {
@@ -359,7 +370,7 @@ export async function executeBatchImport(params: {
             };
 
             await db.items.add(newItem);
-            existingBySku.set(row.sku, newItem);
+            existingBySku.set(row.sku.toUpperCase(), newItem);
 
             await db.syncQueue.add({
               id: `sync-imp-item-${newItemId}-${now}`,

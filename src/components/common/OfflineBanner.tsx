@@ -6,6 +6,9 @@ export const OfflineBanner: React.FC = () => {
   const {
     isOnline,
     pendingSyncCount,
+    failedSyncCount,
+    retryFailedSyncAction,
+    isSyncing,
   } = useSync();
 
   return (
@@ -17,6 +20,18 @@ export const OfflineBanner: React.FC = () => {
           <span>Offline ({pendingSyncCount} pending)</span>
         </div>
       )}
+
+      {/* Floating Failed Sync Notification if online but items are failed */}
+      {isOnline && failedSyncCount > 0 && (
+        <button
+          onClick={retryFailedSyncAction}
+          disabled={isSyncing}
+          className="fixed bottom-20 right-4 z-40 flex items-center gap-2 rounded-full bg-rose-600 text-white px-3.5 py-1.5 text-xs font-bold shadow-xl cursor-pointer hover:bg-rose-700 transition animate-bounce"
+        >
+          <AlertCircle className="w-3.5 h-3.5" />
+          <span>{failedSyncCount} sync items failed &bull; Tap to retry</span>
+        </button>
+      )}
     </>
   );
 };
@@ -26,6 +41,8 @@ export const SyncStatusPill: React.FC<{ compact?: boolean }> = ({ compact = fals
     isOnline,
     isSyncing,
     pendingSyncCount,
+    failedSyncCount,
+    retryFailedSyncAction,
     triggerSync,
     simulateOfflineToggle,
     isSimulatedOffline,
@@ -58,8 +75,21 @@ export const SyncStatusPill: React.FC<{ compact?: boolean }> = ({ compact = fals
         )}
       </button>
 
+      {/* Failed sync retry button */}
+      {failedSyncCount > 0 && (
+        <button
+          onClick={retryFailedSyncAction}
+          disabled={!isOnline || isSyncing}
+          className="flex items-center gap-1 px-2 py-1 rounded-md bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-800 text-xs font-semibold cursor-pointer hover:bg-rose-100 dark:hover:bg-rose-900/50 transition disabled:opacity-60"
+          title={`${failedSyncCount} items failed to sync. Click to retry.`}
+        >
+          <AlertCircle className="w-3 h-3 text-rose-600 dark:text-rose-400" />
+          <span className="text-[11px]">{failedSyncCount} failed &bull; retry</span>
+        </button>
+      )}
+
       {/* Pending sync counter & button */}
-      {pendingSyncCount > 0 && (
+      {pendingSyncCount > 0 && failedSyncCount === 0 && (
         <button
           onClick={triggerSync}
           disabled={!isOnline || isSyncing}

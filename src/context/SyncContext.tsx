@@ -10,6 +10,7 @@ import {
   pullSalesFromFirestore,
   scheduleSync,
   retryFailedSync,
+  requeueStuckStockMovements,
 } from '../db/sync';
 
 interface SyncContextType {
@@ -161,6 +162,20 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+
+    // Requeue any stock movements stuck in failed/pending status from previous sessions
+    const hasRequeuedV2 = typeof localStorage !== 'undefined' && localStorage.getItem('shopledger_requeue_v2');
+    if (!hasRequeuedV2) {
+      requeueStuckStockMovements().then((cnt) => {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('shopledger_requeue_v2', 'true');
+        }
+        if (cnt > 0) {
+          scheduleSync();
+          refreshPendingCount();
+        }
+      }).catch(() => {});
+    }
 
     // Initial check
     refreshPendingCount();

@@ -199,7 +199,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({ onOpenImport }
         updatedAt: now,
       };
 
-      await saveItemAcrossDevices(newItem);
+      await saveItemAcrossDevices(newItem, true);
 
       if (formQty > 0) {
         await adjustStock({

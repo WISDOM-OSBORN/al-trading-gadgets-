@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { User, Sale } from '../../types';
+import { useSync } from '../../context/SyncContext';
 import { db, purgeDummyData, resetDatabaseWithSeed } from '../../db';
 import { firestore, sanitizeForFirestore } from '../../db/firebase';
-import { doc, deleteDoc, setDoc, deleteField, collection, getDocs } from 'firebase/firestore';
+import { doc, deleteDoc, setDoc, deleteField, collection, getDocs, query, where } from 'firebase/firestore';
+import { pullInventoryFromFirestore, requeueStuckStockMovements } from '../../db/sync';
 import { hashPin, verifyPin } from '../../utils/crypto';
 import { formatDateTime } from '../../utils/formatters';
 import {
@@ -35,6 +37,9 @@ import {
   Share2,
   KeyRound,
   Building2,
+  RefreshCw,
+  Cloud,
+  AlertCircle,
 } from 'lucide-react';
 
 interface SettingsScreenProps {
@@ -120,6 +125,138 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
   // Status feedback
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
+
+  // Multi-Device Sync Diagnostics state
+  const { isOnline, isSyncing, retryFailedSyncAction, triggerSync, failedSyncCount } = useSync();
+  const [syncDiagnostics, setSyncDiagnostics] = useState<{
+    localItemCount: number;
+    cloudItemCount: number | null;
+    localOnlySkus: string[];
+    cloudOnlySkus: string[];
+    queueCounts: { pending: number; syncing: number; failed: number; synced: number };
+    recentErrors: Array<{ id: string; entity: string; lastError?: string; createdAt: number }>;
+    lastChecked: number | null;
+  }>({
+    localItemCount: 0,
+    cloudItemCount: null,
+    localOnlySkus: [],
+    cloudOnlySkus: [],
+    queueCounts: { pending: 0, syncing: 0, failed: 0, synced: 0 },
+    recentErrors: [],
+    lastChecked: null,
+  });
+  const [isRefreshingDiagnostics, setIsRefreshingDiagnostics] = useState(false);
+  const [isResettingInventory, setIsResettingInventory] = useState(false);
+  const [syncPanelNotice, setSyncPanelNotice] = useState<string | null>(null);
+
+  const refreshSyncDiagnostics = async () => {
+    try {
+      setIsRefreshingDiagnostics(true);
+      const targetShopId = currentShop?.id || 'shop-electrical-01';
+
+      // 1. Local items & SKUs
+      const localItems = await db.items.where('shopId').equals(targetShopId).toArray();
+      const localSkuMap = new Map<string, string>();
+      localItems.forEach((it) => {
+        if (it.sku) localSkuMap.set(it.sku.toUpperCase(), it.name);
+      });
+
+      // 2. Cloud items & SKUs
+      let cloudItemCount: number | null = null;
+      const cloudSkuMap = new Map<string, string>();
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        try {
+          const snap = await getDocs(query(collection(firestore, 'items'), where('shopId', '==', targetShopId)));
+          let count = 0;
+          snap.docs.forEach((d) => {
+            const data = d.data();
+            if (!data.isDeleted) {
+              count++;
+              if (data.sku) cloudSkuMap.set((data.sku as string).toUpperCase(), data.name || '');
+            }
+          });
+          cloudItemCount = count;
+        } catch (err) {
+          console.warn('Failed to query cloud count for diagnostics:', err);
+        }
+      }
+
+      // 3. Diff SKUs
+      const localOnlySkus: string[] = [];
+      const cloudOnlySkus: string[] = [];
+      localSkuMap.forEach((_, sku) => {
+        if (!cloudSkuMap.has(sku)) localOnlySkus.push(sku);
+      });
+      cloudSkuMap.forEach((_, sku) => {
+        if (!localSkuMap.has(sku)) cloudOnlySkus.push(sku);
+      });
+
+      // 4. Queue stats
+      const [pending, syncing, failed, synced] = await Promise.all([
+        db.syncQueue.where('status').equals('pending').count(),
+        db.syncQueue.where('status').equals('syncing').count(),
+        db.syncQueue.where('status').equals('failed').count(),
+        db.syncQueue.where('status').equals('synced').count(),
+      ]);
+
+      // 5. Recent 5 errors
+      const failedRows = await db.syncQueue
+        .where('status')
+        .equals('failed')
+        .reverse()
+        .limit(5)
+        .toArray();
+
+      setSyncDiagnostics({
+        localItemCount: localItems.length,
+        cloudItemCount,
+        localOnlySkus: localOnlySkus.slice(0, 5),
+        cloudOnlySkus: cloudOnlySkus.slice(0, 5),
+        queueCounts: { pending, syncing, failed, synced },
+        recentErrors: failedRows.map((r) => ({
+          id: r.id,
+          entity: r.entity,
+          lastError: r.lastError,
+          createdAt: r.createdAt,
+        })),
+        lastChecked: Date.now(),
+      });
+    } catch (e) {
+      console.warn('Diagnostics error:', e);
+    } finally {
+      setIsRefreshingDiagnostics(false);
+    }
+  };
+
+  const handleResetLocalInventoryFromCloud = async () => {
+    if (!currentShop) return;
+    try {
+      setIsResettingInventory(true);
+      setSyncPanelNotice(null);
+      await db.items.where('shopId').equals(currentShop.id).delete();
+      await pullInventoryFromFirestore(currentShop.id);
+      await refreshSyncDiagnostics();
+      setSyncPanelNotice('Local inventory successfully reset and synchronized with Cloud Firestore!');
+      setTimeout(() => setSyncPanelNotice(null), 5000);
+    } catch (err: any) {
+      setSyncPanelNotice(`Failed to reset: ${err.message || err}`);
+    } finally {
+      setIsResettingInventory(false);
+    }
+  };
+
+  const handleRetryFailedQueue = async () => {
+    try {
+      setSyncPanelNotice('Requeuing stuck movements and retrying failed sync items...');
+      await requeueStuckStockMovements();
+      await retryFailedSyncAction();
+      await refreshSyncDiagnostics();
+      setSyncPanelNotice('Sync queue retry processed.');
+      setTimeout(() => setSyncPanelNotice(null), 4000);
+    } catch (err: any) {
+      setSyncPanelNotice(`Retry error: ${err.message || err}`);
+    }
+  };
 
   const loadSellers = async () => {
     if (!currentShop) return;
@@ -251,6 +388,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
 
   useEffect(() => {
     loadSellers();
+    refreshSyncDiagnostics();
   }, [currentShop]);
 
   useEffect(() => {
@@ -981,7 +1119,173 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ onOpenAuditLog }
         </div>
       </form>
 
-      {/* Section 5: Data Management & Clean Production Setup */}
+      {/* Section 5: Multi-Device Sync Diagnostics & Cloud Parity */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+        <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-2">
+            <Cloud className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            <h2 className="font-bold text-sm text-slate-900 dark:text-white">
+              Multi-Device Sync Diagnostics & Cloud Parity
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={refreshSyncDiagnostics}
+            disabled={isRefreshingDiagnostics}
+            className="px-2.5 py-1 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 transition text-slate-700 dark:text-slate-200 cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3 h-3 ${isRefreshingDiagnostics ? 'animate-spin' : ''}`} />
+            <span>Check Now</span>
+          </button>
+        </div>
+
+        {syncPanelNotice && (
+          <div className="p-3 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-xs text-blue-800 dark:text-blue-300 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+            <span>{syncPanelNotice}</span>
+          </div>
+        )}
+
+        {/* Stats Grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60">
+            <span className="block text-[10px] font-bold text-slate-400 uppercase">Shop ID</span>
+            <span className="font-mono text-xs font-bold text-slate-800 dark:text-slate-200 truncate block mt-0.5" title={currentShop?.id || 'shop-electrical-01'}>
+              {currentShop?.id || 'shop-electrical-01'}
+            </span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60">
+            <span className="block text-[10px] font-bold text-slate-400 uppercase">Local vs Cloud Items</span>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="font-mono text-sm font-black text-slate-900 dark:text-white">
+                {syncDiagnostics.localItemCount}
+              </span>
+              <span className="text-xs text-slate-400">/</span>
+              <span className="font-mono text-sm font-black text-emerald-600 dark:text-emerald-400">
+                {syncDiagnostics.cloudItemCount !== null ? syncDiagnostics.cloudItemCount : '—'}
+              </span>
+              {syncDiagnostics.cloudItemCount !== null && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ml-auto ${
+                  syncDiagnostics.localItemCount === syncDiagnostics.cloudItemCount
+                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                    : 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                }`}>
+                  {syncDiagnostics.localItemCount === syncDiagnostics.cloudItemCount ? 'In Sync' : 'Diff'}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60">
+            <span className="block text-[10px] font-bold text-slate-400 uppercase">Sync Queue Pending</span>
+            <div className="flex items-baseline gap-2 mt-0.5">
+              <span className="font-mono text-sm font-black text-blue-600 dark:text-blue-400">
+                {syncDiagnostics.queueCounts.pending + syncDiagnostics.queueCounts.syncing}
+              </span>
+              <span className="text-[10px] text-slate-400">
+                ({syncDiagnostics.queueCounts.synced} synced)
+              </span>
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60">
+            <span className="block text-[10px] font-bold text-slate-400 uppercase">Failed Sync Items</span>
+            <div className="flex items-center justify-between mt-0.5">
+              <span className={`font-mono text-sm font-black ${
+                syncDiagnostics.queueCounts.failed > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500'
+              }`}>
+                {syncDiagnostics.queueCounts.failed}
+              </span>
+              {syncDiagnostics.queueCounts.failed > 0 && (
+                <button
+                  type="button"
+                  onClick={handleRetryFailedQueue}
+                  disabled={isSyncing}
+                  className="text-[10px] px-2 py-0.5 rounded-md bg-rose-600 text-white font-bold hover:bg-rose-700 cursor-pointer shadow-xs disabled:opacity-50"
+                >
+                  Retry All
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* SKU Diff Warning (if any) */}
+        {(syncDiagnostics.localOnlySkus.length > 0 || syncDiagnostics.cloudOnlySkus.length > 0) && (
+          <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs space-y-1">
+            <div className="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Catalog Discrepancy Observed</span>
+            </div>
+            {syncDiagnostics.localOnlySkus.length > 0 && (
+              <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                Local-only items: <code className="font-mono font-bold">{syncDiagnostics.localOnlySkus.join(', ')}</code>
+              </p>
+            )}
+            {syncDiagnostics.cloudOnlySkus.length > 0 && (
+              <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                Cloud-only items: <code className="font-mono font-bold">{syncDiagnostics.cloudOnlySkus.join(', ')}</code>
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Recent Sync Errors */}
+        {syncDiagnostics.recentErrors.length > 0 && (
+          <div className="space-y-1.5">
+            <span className="text-[11px] font-bold text-rose-600 dark:text-rose-400 flex items-center gap-1">
+              <AlertCircle className="w-3.5 h-3.5" />
+              <span>Recent Sync Failures ({syncDiagnostics.recentErrors.length})</span>
+            </span>
+            <div className="rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50/50 dark:bg-rose-950/20 divide-y divide-rose-200/50 dark:divide-rose-900/50 max-h-36 overflow-y-auto text-[11px]">
+              {syncDiagnostics.recentErrors.map((err) => (
+                <div key={err.id} className="p-2 flex items-start justify-between gap-2">
+                  <div className="space-y-0.5 min-w-0">
+                    <span className="font-semibold text-rose-900 dark:text-rose-200 uppercase font-mono text-[10px]">
+                      {err.entity}
+                    </span>
+                    <p className="text-rose-700 dark:text-rose-300 font-mono text-[10px] break-words">
+                      {err.lastError || 'Unknown sync error'}
+                    </p>
+                  </div>
+                  <span className="text-[9px] text-rose-500 whitespace-nowrap">
+                    {new Date(err.createdAt).toLocaleTimeString()}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Sync Actions */}
+        <div className="flex flex-wrap gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+          <button
+            type="button"
+            onClick={handleResetLocalInventoryFromCloud}
+            disabled={isResettingInventory || !isOnline}
+            className="px-3.5 py-2 rounded-xl border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-bold hover:bg-emerald-100 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            title="Wipes local indexedDB items and pulls fresh live documents from Firestore"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${isResettingInventory ? 'animate-spin' : ''}`} />
+            <span>{isResettingInventory ? 'Resetting from Cloud...' : 'Reset Local Inventory from Cloud'}</span>
+          </button>
+
+          {syncDiagnostics.queueCounts.failed > 0 && (
+            <button
+              type="button"
+              onClick={handleRetryFailedQueue}
+              disabled={isSyncing || !isOnline}
+              className="px-3.5 py-2 rounded-xl border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 text-xs font-bold hover:bg-rose-100 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span>Retry All Failed Syncs ({syncDiagnostics.queueCounts.failed})</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Section 6: Data Management & Clean Production Setup */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
         <div className="flex items-center gap-2 pb-2 border-b border-slate-100 dark:border-slate-800">
           <Database className="w-4 h-4 text-purple-500" />

@@ -14,6 +14,7 @@ import {
   onSnapshot,
   runTransaction,
   increment,
+  deleteField,
 } from 'firebase/firestore';
 import {
   Item,
@@ -76,15 +77,31 @@ export async function generateNextInvoiceNumber(prefix: string, deviceCode: stri
   return `${prefix}-${deviceCode}-${paddedSeq}`;
 }
 
+// Requeue stuck stock movements so failed transactions retry cleanly
+export async function requeueStuckStockMovements(): Promise<number> {
+  const count = await db.syncQueue
+    .where('status')
+    .anyOf('pending', 'failed')
+    .filter((q) => q.entity === 'stockMovement')
+    .modify({ status: 'pending', attempts: 0, nextRetryAt: 0, lastError: undefined });
+  return count;
+}
+
 async function pushStockMovement(m: StockMovement): Promise<void> {
   const movRef = doc(firestore, 'stockMovements', m.id);
   const itemRef = doc(firestore, 'items', m.itemId);
+  // Read local Dexie item BEFORE the Firestore transaction
+  const localItem = await db.items.get(m.itemId);
+
   await runTransaction(firestore, async (tx) => {
-    const snap = await tx.get(movRef);
-    if (snap.exists()) return; // already applied -> idempotent retry
+    // ---- 1. ALL READS FIRST (Mandatory in Firestore transactions) ----
+    const movSnap = await tx.get(movRef);
+    const itemSnap = await tx.get(itemRef);
+    if (movSnap.exists()) return; // already applied -> idempotent retry
+
+    // ---- 2. THEN ALL WRITES ----
     tx.set(movRef, sanitizeForFirestore({ ...m, syncedAt: Date.now() }));
 
-    const itemSnap = await tx.get(itemRef);
     if (itemSnap.exists()) {
       const data = itemSnap.data() || {};
       const currentCloudQty = Number(data.quantity) || 0;
@@ -101,51 +118,77 @@ async function pushStockMovement(m: StockMovement): Promise<void> {
         },
         { merge: true }
       );
-    } else {
-      // Document didn't exist in Firestore yet: fetch item from local DB
-      const localItem = await db.items.get(m.itemId);
-      if (localItem) {
-        tx.set(
-          itemRef,
-          sanitizeForFirestore({
-            ...localItem,
-            quantity: Math.max(0, m.newQty),
-            lastMovementId: m.id,
-            recentMovementIds: [m.id],
-            updatedAt: Date.now(),
-          })
-        );
-      }
+    } else if (localItem) {
+      tx.set(
+        itemRef,
+        sanitizeForFirestore({
+          ...localItem,
+          quantity: Math.max(0, m.newQty),
+          lastMovementId: m.id,
+          recentMovementIds: [m.id],
+          updatedAt: Date.now(),
+        })
+      );
     }
   });
 }
 
-/** Pushes item and retains/updates full metadata; preserves cloud stock quantity unless explicitly seeding. */
-export async function pushItem(item: Item, seedQuantity = false): Promise<void> {
+/** Pushes item and retains/updates full metadata; preserves cloud stock quantity unless explicitly seeding/creating. */
+export async function pushItem(item: Item, isCreateOrImport = false): Promise<void> {
   const ref = doc(firestore, 'items', item.id);
   const clean = sanitizeForFirestore(item) as Item;
+  let shouldDeleteLocal = false;
+
   await runTransaction(firestore, async (tx) => {
     const snap = await tx.get(ref);
     if (snap.exists()) {
-      if (seedQuantity) {
-        tx.set(ref, clean, { merge: true });
+      const existingData = snap.data();
+      if (existingData?.isDeleted) {
+        if (isCreateOrImport) {
+          // Re-adding a previously deleted SKU/item -> revive it and clear tombstone
+          tx.set(
+            ref,
+            {
+              ...clean,
+              isDeleted: false,
+              deletedAt: deleteField(),
+              updatedAt: Date.now(),
+            },
+            { merge: true }
+          );
+        } else {
+          // Plain edit on an item that was deleted in the cloud -> do not revive
+          shouldDeleteLocal = true;
+          return;
+        }
       } else {
-        const existingData = snap.data();
-        const { quantity, ...metadataWithoutQty } = clean;
-        const cloudQtyNum = Number(existingData?.quantity);
-        tx.set(
-          ref,
-          {
-            ...metadataWithoutQty,
-            quantity: Number.isFinite(cloudQtyNum) ? cloudQtyNum : clean.quantity,
-          },
-          { merge: true }
-        );
+        if (isCreateOrImport) {
+          tx.set(ref, clean, { merge: true });
+        } else {
+          const { quantity, ...metadataWithoutQty } = clean;
+          const cloudQtyNum = Number(existingData?.quantity);
+          tx.set(
+            ref,
+            {
+              ...metadataWithoutQty,
+              quantity: Number.isFinite(cloudQtyNum) ? cloudQtyNum : clean.quantity,
+              updatedAt: Date.now(),
+            },
+            { merge: true }
+          );
+        }
       }
     } else {
       tx.set(ref, clean);
     }
   });
+
+  if (shouldDeleteLocal) {
+    await db.items.delete(item.id);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+    }
+  }
 }
 
 async function dispatchQueueItem(q: SyncQueueItem): Promise<void> {
@@ -169,7 +212,7 @@ async function dispatchQueueItem(q: SyncQueueItem): Promise<void> {
         );
         return;
       }
-      return pushItem(p as Item);
+      return pushItem(p as Item, q.action === 'create');
     case 'sale':
       await setDoc(doc(firestore, 'sales', p.id), sanitizeForFirestore(p), { merge: true });
       await db.sales.update(p.id, { syncedAt: Date.now() });
@@ -205,8 +248,19 @@ export async function processSyncQueue(): Promise<{ synced: number; remaining: n
     await db.syncQueue.where('status').equals('syncing').modify({ status: 'pending' });
 
     const now = Date.now();
-    const due = (await db.syncQueue.where('status').anyOf('pending', 'failed').sortBy('createdAt'))
+    const allPendingOrFailed = await db.syncQueue
+      .where('status')
+      .anyOf('pending', 'failed')
+      .toArray();
+
+    const due = allPendingOrFailed
       .filter((q) => q.attempts < MAX_ATTEMPTS && (q.nextRetryAt ?? 0) <= now)
+      .sort((a, b) => {
+        if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+        // Prioritize 'item' creations/updates before 'stockMovement' deltas
+        const priority = (entity: string) => (entity === 'item' ? 0 : entity === 'stockMovement' ? 1 : 2);
+        return priority(a.entity) - priority(b.entity);
+      })
       .slice(0, 50);
 
     for (const q of due) {
@@ -570,135 +624,146 @@ export async function syncAllInventoryToFirestore(
   }
 }
 
+let applyCloudMutex: Promise<{ pulled: number; removed: number }> = Promise.resolve({ pulled: 0, removed: 0 });
+
 // Apply items from Cloud Firestore snapshot into local Dexie
-export async function applyCloudItemsToLocal(
+export function applyCloudItemsToLocal(
   docs: Array<{ id: string; data: () => any }>,
   shopId: string,
   options: { isFullSnapshot?: boolean } = {}
 ): Promise<{ pulled: number; removed: number }> {
-  const targetShopId = shopId || SEED_SHOP_ID;
+  applyCloudMutex = applyCloudMutex.then(async () => {
+    const targetShopId = shopId || SEED_SHOP_ID;
 
-  // 1. Gather all open queue items (stock movements and item edits/creates)
-  const openQueue = await db.syncQueue
-    .where('status')
-    .anyOf('pending', 'syncing', 'failed')
-    .toArray();
+    return await db.transaction('rw', [db.items, db.syncQueue], async () => {
+      // 1. Gather all open queue items (stock movements and item edits/creates)
+      const openQueue = await db.syncQueue
+        .where('status')
+        .anyOf('pending', 'syncing', 'failed')
+        .toArray();
 
-  const openItemQueueById = new Map<string, SyncQueueItem>();
-  for (const q of openQueue) {
-    if (q.entity === 'item' && q.payload?.id) {
-      openItemQueueById.set(q.payload.id, q);
-    }
-  }
-
-  const cloudIdsInSnapshot = new Set<string>();
-  const cloudItemsToPut: Item[] = [];
-  let removedCount = 0;
-
-  for (const d of docs) {
-    const data = d.data() as Item & {
-      isDeleted?: boolean;
-      deletedAt?: number;
-      lastMovementId?: string;
-      recentMovementIds?: string[];
-    };
-
-    if (!data) continue;
-    const docId = d.id;
-    cloudIdsInSnapshot.add(docId);
-
-    // If cloud document is soft-deleted (tombstoned), remove from local Dexie
-    if (data.isDeleted) {
-      const existing = await db.items.get(docId);
-      if (existing) {
-        await db.items.delete(docId);
-        removedCount++;
-      }
-      continue;
-    }
-
-    if (data.name) {
-      const cloudQty = Number(data.quantity) || 0;
-      if (cloudQty < 0) {
-        console.warn(`[Inventory] Cloud stock for "${data.name}" (${docId}) is negative: ${cloudQty}`);
-      }
-
-      // Check if local device has unpushed stock movements for this item
-      const recentApplied = new Set<string>();
-      if (data.lastMovementId) recentApplied.add(data.lastMovementId);
-      if (Array.isArray(data.recentMovementIds)) {
-        for (const movId of data.recentMovementIds) {
-          if (movId) recentApplied.add(movId);
-        }
-      }
-
-      let pendingDelta = 0;
+      const openItemQueueById = new Map<string, SyncQueueItem>();
       for (const q of openQueue) {
-        if (q.entity === 'stockMovement') {
-          const m = q.payload as StockMovement;
-          if (m && m.itemId === docId && !recentApplied.has(m.id)) {
-            pendingDelta += m.qtyChange;
+        if (q.entity === 'item' && q.payload?.id) {
+          openItemQueueById.set(q.payload.id, q);
+        }
+      }
+
+      const cloudIdsInSnapshot = new Set<string>();
+      const cloudItemsToPut: Item[] = [];
+      let removedCount = 0;
+
+      for (const d of docs) {
+        const data = d.data() as Item & {
+          isDeleted?: boolean;
+          deletedAt?: number;
+          lastMovementId?: string;
+          recentMovementIds?: string[];
+        };
+
+        if (!data) continue;
+        const docId = d.id;
+        cloudIdsInSnapshot.add(docId);
+
+        // If cloud document is soft-deleted (tombstoned), remove from local Dexie
+        if (data.isDeleted) {
+          const existing = await db.items.get(docId);
+          if (existing) {
+            await db.items.delete(docId);
+            removedCount++;
+          }
+          continue;
+        }
+
+        if (data.name) {
+          const cloudQty = Number(data.quantity) || 0;
+          if (cloudQty < 0) {
+            console.warn(`[Inventory] Cloud stock for "${data.name}" (${docId}) is negative: ${cloudQty}`);
+          }
+
+          // Check if local device has unpushed stock movements for this item
+          const recentApplied = new Set<string>();
+          if (data.lastMovementId) recentApplied.add(data.lastMovementId);
+          if (Array.isArray(data.recentMovementIds)) {
+            for (const movId of data.recentMovementIds) {
+              if (movId) recentApplied.add(movId);
+            }
+          }
+
+          let pendingDelta = 0;
+          for (const q of openQueue) {
+            if (q.entity === 'stockMovement') {
+              const m = q.payload as StockMovement;
+              if (m && m.itemId === docId && !recentApplied.has(m.id)) {
+                pendingDelta += m.qtyChange;
+              }
+            }
+          }
+
+          const finalQuantity = cloudQty + pendingDelta;
+
+          // Protect pending local item edits
+          const pendingItemQueue = openItemQueueById.get(docId);
+          if (pendingItemQueue && pendingItemQueue.payload) {
+            const localItem = await db.items.get(docId);
+            const localUpdatedAt = localItem?.updatedAt || pendingItemQueue.payload.updatedAt || 0;
+            const cloudUpdatedAt = Number(data.updatedAt) || 0;
+            if (localUpdatedAt > cloudUpdatedAt) {
+              if (localItem) {
+                cloudItemsToPut.push({
+                  ...localItem,
+                  quantity: finalQuantity,
+                  updatedAt: localUpdatedAt,
+                });
+                continue;
+              }
+            }
+          }
+
+          cloudItemsToPut.push({
+            ...data,
+            id: docId,
+            shopId: data.shopId || targetShopId,
+            costPrice: Number(data.costPrice) || 0,
+            sellingPrice: Number(data.sellingPrice) || 0,
+            quantity: finalQuantity,
+            archived: Boolean(data.archived),
+            updatedAt: Number(data.updatedAt) || Date.now(),
+          });
+        }
+      }
+
+      // If this is a full snapshot, remove local items that no longer exist in cloud
+      // unless they have an open item create/update in syncQueue
+      if (options.isFullSnapshot) {
+        const localItems = await db.items.where('shopId').equals(targetShopId).toArray();
+        for (const localIt of localItems) {
+          if (!cloudIdsInSnapshot.has(localIt.id)) {
+            const hasOpenQueue = openItemQueueById.has(localIt.id);
+            if (!hasOpenQueue) {
+              await db.items.delete(localIt.id);
+              removedCount++;
+            }
           }
         }
       }
 
-      const finalQuantity = cloudQty + pendingDelta;
-
-      // Protect pending local item edits (Change 5)
-      const pendingItemQueue = openItemQueueById.get(docId);
-      if (pendingItemQueue && pendingItemQueue.payload) {
-        const localItem = await db.items.get(docId);
-        const localUpdatedAt = localItem?.updatedAt || pendingItemQueue.payload.updatedAt || 0;
-        const cloudUpdatedAt = Number(data.updatedAt) || 0;
-        if (localUpdatedAt > cloudUpdatedAt) {
-          if (localItem) {
-            cloudItemsToPut.push({
-              ...localItem,
-              quantity: finalQuantity,
-              updatedAt: localUpdatedAt,
-            });
-            continue;
-          }
-        }
+      if (cloudItemsToPut.length > 0) {
+        await db.items.bulkPut(cloudItemsToPut);
       }
 
-      cloudItemsToPut.push({
-        ...data,
-        id: docId,
-        shopId: data.shopId || targetShopId,
-        costPrice: Number(data.costPrice) || 0,
-        sellingPrice: Number(data.sellingPrice) || 0,
-        quantity: finalQuantity,
-        archived: Boolean(data.archived),
-        updatedAt: Number(data.updatedAt) || Date.now(),
-      });
-    }
-  }
-
-  // If this is a full snapshot, remove local items that no longer exist in cloud
-  // unless they have an open item create/update in syncQueue (Change 1b #2)
-  if (options.isFullSnapshot) {
-    const localItems = await db.items.where('shopId').equals(targetShopId).toArray();
-    for (const localIt of localItems) {
-      if (!cloudIdsInSnapshot.has(localIt.id)) {
-        const hasOpenQueue = openItemQueueById.has(localIt.id);
-        if (!hasOpenQueue) {
-          await db.items.delete(localIt.id);
-          removedCount++;
-        }
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
       }
-    }
-  }
 
-  if (cloudItemsToPut.length > 0) {
-    await db.items.bulkPut(cloudItemsToPut);
-  }
+      return { pulled: cloudItemsToPut.length, removed: removedCount };
+    });
+  }).catch((err) => {
+    console.warn('Error applying cloud items to local DB:', err);
+    return { pulled: 0, removed: 0 };
+  });
 
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
-  }
-
-  return { pulled: cloudItemsToPut.length, removed: removedCount };
+  return applyCloudMutex;
 }
 
 // Pull latest inventory from Cloud Firestore into local Dexie
@@ -862,44 +927,45 @@ export async function pullSalesFromFirestore(shopId?: string): Promise<{ pulled:
   }
 }
 
-// Save or update an item across Dexie and Cloud Firestore
-export async function saveItemAcrossDevices(item: Item): Promise<void> {
+// Save or update an item across Dexie and Cloud Firestore (Outbox pattern)
+export async function saveItemAcrossDevices(item: Item, isNew = false): Promise<void> {
   const now = Date.now();
   const cleanItem: Item = {
     ...item,
     updatedAt: now,
   };
-  await db.items.put(cleanItem);
 
-  if (typeof navigator !== 'undefined' && navigator.onLine) {
-    try {
-      await pushItem(cleanItem, false);
-    } catch (err) {
-      console.warn('Immediate Firestore item save failed, queued for sync:', err);
-      await db.syncQueue.add({
-        id: `sync-item-${cleanItem.id}-${now}`,
-        entity: 'item',
-        action: 'update',
-        payload: cleanItem,
-        attempts: 0,
-        status: 'pending',
-        createdAt: now,
-      });
-    }
-  } else {
+  const queueId = `sync-item-${cleanItem.id}-${now}`;
+
+  // 1. Write item to Dexie AND add to syncQueue transactionally so it is ALWAYS protected against snapshot deletion
+  await db.transaction('rw', [db.items, db.syncQueue], async () => {
+    await db.items.put(cleanItem);
     await db.syncQueue.add({
-      id: `sync-item-${cleanItem.id}-${now}`,
+      id: queueId,
       entity: 'item',
-      action: 'update',
+      action: isNew ? 'create' : 'update',
       payload: cleanItem,
       attempts: 0,
       status: 'pending',
       createdAt: now,
     });
-  }
+  });
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+  }
+
+  // 2. If online, attempt immediate push; on success mark synced, on failure leave pending for background sync
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    try {
+      await pushItem(cleanItem, isNew);
+      await db.syncQueue.update(queueId, { status: 'synced' });
+    } catch (err) {
+      console.warn('Immediate Firestore item push notice (will retry via queue):', err);
+      scheduleSync();
+    }
+  } else {
+    scheduleSync();
   }
 }
 

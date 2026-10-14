@@ -137,6 +137,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let unsubShop: (() => void) | undefined;
 
     async function setupRealtimeSync() {
+      unsubUsers?.();
+      unsubShop?.();
+
       const shop = await db.shops.toCollection().first();
       const shopId = shop?.id || 'shop-electrical-01';
 
@@ -148,6 +151,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     setupRealtimeSync();
 
+    const handleOnline = () => {
+      setupRealtimeSync();
+    };
+    window.addEventListener('online', handleOnline);
+
     const handleShopUpdate = (e: any) => {
       if (e.detail) setCurrentShop(e.detail);
     };
@@ -156,6 +164,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       unsubUsers?.();
       unsubShop?.();
+      window.removeEventListener('online', handleOnline);
       window.removeEventListener('shopledger_shop_updated', handleShopUpdate);
     };
   }, []);
