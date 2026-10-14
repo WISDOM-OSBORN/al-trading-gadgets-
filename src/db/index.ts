@@ -164,14 +164,18 @@ export async function initializeDatabase() {
     }
   }
 
-  // 4. Ensure initial gadgets catalog is present if items table is empty
+  // 4. Ensure initial catalog is present: hydrate from Cloud Firestore first
   const currentItemCount = await db.items.count();
-  const wasPurged = localStorage.getItem('shopledger_last_purged_at');
+  const wasPurged = typeof localStorage !== 'undefined' && localStorage.getItem('shopledger_last_purged_at');
   if (currentItemCount === 0 && !wasPurged) {
     let cloudLoaded = false;
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       try {
-        const snap = await getDocs(query(collection(firestore, 'items'), where('shopId', '==', targetShopId)));
+        const fetchPromise = getDocs(query(collection(firestore, 'items'), where('shopId', '==', targetShopId)));
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Cloud inventory fetch timeout')), 5000)
+        );
+        const snap = await Promise.race([fetchPromise, timeoutPromise]);
         if (!snap.empty) {
           const cloudItems: Item[] = [];
           for (const d of snap.docs) {
@@ -199,7 +203,10 @@ export async function initializeDatabase() {
       }
     }
 
-    if (!cloudLoaded) {
+    // Only seed demo items if explicitly in DEV mode or opted-in via flag (Change 2)
+    const allowDemoSeed = Boolean(import.meta.env.DEV) ||
+      (typeof localStorage !== 'undefined' && localStorage.getItem('shopledger_allow_demo_seed') === '1');
+    if (!cloudLoaded && allowDemoSeed) {
       const now = Date.now();
       const itemRecords: Item[] = INITIAL_GADGETS.map((g, idx) => ({
         ...g,
@@ -420,34 +427,37 @@ export async function purgeDummyData(): Promise<void> {
 
   localStorage.setItem('shopledger_last_purged_at', purgeTimestamp.toString());
 
-  // Also purge from Cloud Firestore so all other devices wipe dummy records
+  // Also purge from Cloud Firestore for this specific shop so all other devices wipe dummy records
   try {
-    // 1. Delete all items from Firestore
-    const itemsSnap = await getDocs(collection(firestore, 'items'));
+    const existingShop = await db.shops.toCollection().first();
+    const targetShopId = existingShop?.id || SEED_SHOP_ID;
+
+    // 1. Delete all items for this shop from Firestore
+    const itemsSnap = await getDocs(query(collection(firestore, 'items'), where('shopId', '==', targetShopId)));
     for (const d of itemsSnap.docs) {
       try {
         await deleteDoc(d.ref);
       } catch {}
     }
 
-    // 2. Delete all sales from Firestore
-    const salesSnap = await getDocs(collection(firestore, 'sales'));
+    // 2. Delete all sales for this shop from Firestore
+    const salesSnap = await getDocs(query(collection(firestore, 'sales'), where('shopId', '==', targetShopId)));
     for (const d of salesSnap.docs) {
       try {
         await deleteDoc(d.ref);
       } catch {}
     }
 
-    // 3. Delete all imports from Firestore
-    const importsSnap = await getDocs(collection(firestore, 'imports'));
+    // 3. Delete all imports for this shop from Firestore
+    const importsSnap = await getDocs(query(collection(firestore, 'imports'), where('shopId', '==', targetShopId)));
     for (const d of importsSnap.docs) {
       try {
         await deleteDoc(d.ref);
       } catch {}
     }
 
-    // 4. Update shop document in Firestore with purge timestamp
-    const shopRef = doc(firestore, 'shops', 'shop-electrical-01');
+    // 4. Update shop document in Firestore with purge timestamp (Change 3)
+    const shopRef = doc(firestore, 'shops', targetShopId);
     await setDoc(
       shopRef,
       {
@@ -462,6 +472,7 @@ export async function purgeDummyData(): Promise<void> {
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+    window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
   }
 }
 

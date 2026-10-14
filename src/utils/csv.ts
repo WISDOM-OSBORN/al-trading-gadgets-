@@ -3,6 +3,13 @@ import { Item, InventoryImportHistory } from '../types';
 import { db } from '../db';
 import { syncAllInventoryToFirestore } from '../db/sync';
 import { applyStockChangeTx } from '../db/stock';
+import { firestore } from '../db/firebase';
+import { collection, query, where, getDocs } from 'firebase/firestore';
+
+export function deterministicItemId(shopId: string, sku: string): string {
+  const safeSku = sku.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '_');
+  return `item-sku-${shopId}-${safeSku}`;
+}
 
 export const CSV_TEMPLATE_HEADERS = [
   'name',
@@ -241,6 +248,24 @@ export async function executeBatchImport(params: {
   const existingBySku = new Map<string, Item>();
   existingItems.forEach((i) => existingBySku.set(i.sku.toUpperCase(), i));
 
+  // If online, also check Firestore for existing items for this shop to prevent duplicates across devices (Change 6)
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    try {
+      const snap = await getDocs(query(collection(firestore, 'items'), where('shopId', '==', shopId)));
+      for (const d of snap.docs) {
+        const cItem = d.data() as Item;
+        if (cItem?.sku && !cItem.isDeleted) {
+          const upperSku = cItem.sku.toUpperCase();
+          if (!existingBySku.has(upperSku)) {
+            existingBySku.set(upperSku, { ...cItem, id: d.id });
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Could not check remote inventory before CSV import:', e);
+    }
+  }
+
   const total = validRows.length;
   const batchSize = 100;
 
@@ -312,8 +337,8 @@ export async function executeBatchImport(params: {
               affectedItemIds.push(existing.id);
             }
           } else {
-            // New item: add with quantity 0, then apply initial stock
-            const newItemId = `item-imp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+            // New item: deterministic ID from SKU so multiple devices importing write to same doc
+            const newItemId = deterministicItemId(shopId, row.sku);
             const newItem: Item = {
               id: newItemId,
               shopId,

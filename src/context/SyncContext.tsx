@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { db } from '../db';
+import { SEED_SHOP_ID } from '../db/seedData';
 import {
   processSyncQueue,
   syncAllInventoryToFirestore,
@@ -8,16 +9,19 @@ import {
   subscribeToCloudSales,
   pullSalesFromFirestore,
   scheduleSync,
+  retryFailedSync,
 } from '../db/sync';
 
 interface SyncContextType {
   isOnline: boolean;
   isSyncing: boolean;
   pendingSyncCount: number;
+  failedSyncCount: number;
   lastSyncedTime: number | null;
   syncBannerMessage: string | null;
   triggerSync: () => Promise<void>;
   syncFullInventory: () => Promise<void>;
+  retryFailedSyncAction: () => Promise<void>;
   simulateOfflineToggle: () => void;
   isSimulatedOffline: boolean;
 }
@@ -31,16 +35,26 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isSimulatedOffline, setIsSimulatedOffline] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [failedSyncCount, setFailedSyncCount] = useState(0);
   const [lastSyncedTime, setLastSyncedTime] = useState<number | null>(Date.now());
   const [syncBannerMessage, setSyncBannerMessage] = useState<string | null>(null);
 
   const effectiveOnline = browserOnline && !isSimulatedOffline;
 
-  // Update pending count
+  // Update pending and failed counts (Change 4)
   const refreshPendingCount = useCallback(async () => {
     try {
-      const count = await db.syncQueue.where('status').equals('pending').count();
-      setPendingSyncCount(count);
+      const openCount = await db.syncQueue
+        .where('status')
+        .anyOf('pending', 'failed', 'syncing')
+        .count();
+      setPendingSyncCount(openCount);
+
+      const failedCount = await db.syncQueue
+        .where('status')
+        .equals('failed')
+        .count();
+      setFailedSyncCount(failedCount);
     } catch {
       // Ignore during initial db bootstrap
     }
@@ -57,7 +71,7 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       // 2. Pull latest Cloud Firestore inventory & sales so all devices match
       const shop = await db.shops.toCollection().first();
-      const shopId = shop?.id || 'shop-electrical-01';
+      const shopId = shop?.id || SEED_SHOP_ID;
       await pullInventoryFromFirestore(shopId);
       await pullSalesFromFirestore(shopId);
 
@@ -70,13 +84,27 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [effectiveOnline, isSyncing, refreshPendingCount]);
 
+  // Explicit retry of failed items (Change 4)
+  const retryFailedSyncAction = useCallback(async () => {
+    if (!effectiveOnline || isSyncing) return;
+    try {
+      setIsSyncing(true);
+      await retryFailedSync();
+      await refreshPendingCount();
+    } catch (err: any) {
+      console.warn('Retry failed sync notice:', err?.message || err);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [effectiveOnline, isSyncing, refreshPendingCount]);
+
   // Explicit full catalog sync (called on demand from settings or imports)
   const syncFullInventory = useCallback(async () => {
     if (!effectiveOnline || isSyncing) return;
     try {
       setIsSyncing(true);
       const shop = await db.shops.toCollection().first();
-      const shopId = shop?.id || 'shop-electrical-01';
+      const shopId = shop?.id || SEED_SHOP_ID;
       await syncAllInventoryToFirestore(shopId, true);
       await pullInventoryFromFirestore(shopId);
       await pullSalesFromFirestore(shopId);
@@ -97,7 +125,7 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     async function initListener() {
       const shop = await db.shops.toCollection().first();
-      const shopId = shop?.id || 'shop-electrical-01';
+      const shopId = shop?.id || SEED_SHOP_ID;
       if (effectiveOnline) {
         // Initial non-blocking pull
         pullInventoryFromFirestore(shopId).catch(() => {});
@@ -137,12 +165,11 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Initial check
     refreshPendingCount();
 
-    // 30s interval for scheduleSync & refresh
+    // 30s interval for background retry only (Change 7: no redundant full pulls every 30s)
     const interval = setInterval(() => {
       refreshPendingCount();
       if (effectiveOnline) {
         scheduleSync();
-        triggerSync();
       }
     }, 30000);
 
@@ -151,7 +178,7 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
       window.removeEventListener('offline', handleOffline);
       clearInterval(interval);
     };
-  }, [effectiveOnline, triggerSync, refreshPendingCount]);
+  }, [effectiveOnline, refreshPendingCount]);
 
   // When reconnecting online, automatically trigger queue sync
   useEffect(() => {
@@ -170,10 +197,12 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isOnline: effectiveOnline,
         isSyncing,
         pendingSyncCount,
+        failedSyncCount,
         lastSyncedTime,
         syncBannerMessage,
         triggerSync,
         syncFullInventory,
+        retryFailedSyncAction,
         simulateOfflineToggle,
         isSimulatedOffline,
       }}

@@ -1,10 +1,12 @@
 import { db } from './index';
 import { firestore, sanitizeForFirestore } from './firebase';
+import { SEED_SHOP_ID } from './seedData';
 import {
   doc,
   setDoc,
   getDoc,
   getDocs,
+  getDocsFromServer,
   deleteDoc,
   collection,
   query,
@@ -52,7 +54,7 @@ export interface RecordSaleParams {
 }
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
-const MAX_ATTEMPTS = 8;
+const MAX_ATTEMPTS = 25;
 const backoffMs = (attempts: number) => Math.min(5 * 60_000, 2_000 * 2 ** attempts);
 
 // Generate offline-safe collision-free invoice number: <prefix>-<deviceCode>-<seq>
@@ -130,11 +132,12 @@ export async function pushItem(item: Item, seedQuantity = false): Promise<void> 
       } else {
         const existingData = snap.data();
         const { quantity, ...metadataWithoutQty } = clean;
+        const cloudQtyNum = Number(existingData?.quantity);
         tx.set(
           ref,
           {
             ...metadataWithoutQty,
-            quantity: Number(existingData?.quantity) ?? clean.quantity,
+            quantity: Number.isFinite(cloudQtyNum) ? cloudQtyNum : clean.quantity,
           },
           { merge: true }
         );
@@ -152,7 +155,19 @@ async function dispatchQueueItem(q: SyncQueueItem): Promise<void> {
       return pushStockMovement(p as StockMovement);
     case 'item':
       if (q.action === 'delete') {
-        return deleteDoc(doc(firestore, 'items', p.id));
+        const deletedAt = (p as any).deletedAt || Date.now();
+        await setDoc(
+          doc(firestore, 'items', p.id),
+          {
+            id: p.id,
+            shopId: (p as any).shopId || SEED_SHOP_ID,
+            isDeleted: true,
+            deletedAt,
+            updatedAt: Date.now(),
+          },
+          { merge: true }
+        );
+        return;
       }
       return pushItem(p as Item);
     case 'sale':
@@ -530,7 +545,7 @@ export async function syncAllInventoryToFirestore(
     }
 
     try {
-      const shopRef = doc(firestore, 'shops', shopId || 'shop-electrical-01');
+      const shopRef = doc(firestore, 'shops', shopId || SEED_SHOP_ID);
       await setDoc(shopRef, { lastInventoryUpdated: Date.now() }, { merge: true });
     } catch {}
 
@@ -555,6 +570,137 @@ export async function syncAllInventoryToFirestore(
   }
 }
 
+// Apply items from Cloud Firestore snapshot into local Dexie
+export async function applyCloudItemsToLocal(
+  docs: Array<{ id: string; data: () => any }>,
+  shopId: string,
+  options: { isFullSnapshot?: boolean } = {}
+): Promise<{ pulled: number; removed: number }> {
+  const targetShopId = shopId || SEED_SHOP_ID;
+
+  // 1. Gather all open queue items (stock movements and item edits/creates)
+  const openQueue = await db.syncQueue
+    .where('status')
+    .anyOf('pending', 'syncing', 'failed')
+    .toArray();
+
+  const openItemQueueById = new Map<string, SyncQueueItem>();
+  for (const q of openQueue) {
+    if (q.entity === 'item' && q.payload?.id) {
+      openItemQueueById.set(q.payload.id, q);
+    }
+  }
+
+  const cloudIdsInSnapshot = new Set<string>();
+  const cloudItemsToPut: Item[] = [];
+  let removedCount = 0;
+
+  for (const d of docs) {
+    const data = d.data() as Item & {
+      isDeleted?: boolean;
+      deletedAt?: number;
+      lastMovementId?: string;
+      recentMovementIds?: string[];
+    };
+
+    if (!data) continue;
+    const docId = d.id;
+    cloudIdsInSnapshot.add(docId);
+
+    // If cloud document is soft-deleted (tombstoned), remove from local Dexie
+    if (data.isDeleted) {
+      const existing = await db.items.get(docId);
+      if (existing) {
+        await db.items.delete(docId);
+        removedCount++;
+      }
+      continue;
+    }
+
+    if (data.name) {
+      const cloudQty = Number(data.quantity) || 0;
+      if (cloudQty < 0) {
+        console.warn(`[Inventory] Cloud stock for "${data.name}" (${docId}) is negative: ${cloudQty}`);
+      }
+
+      // Check if local device has unpushed stock movements for this item
+      const recentApplied = new Set<string>();
+      if (data.lastMovementId) recentApplied.add(data.lastMovementId);
+      if (Array.isArray(data.recentMovementIds)) {
+        for (const movId of data.recentMovementIds) {
+          if (movId) recentApplied.add(movId);
+        }
+      }
+
+      let pendingDelta = 0;
+      for (const q of openQueue) {
+        if (q.entity === 'stockMovement') {
+          const m = q.payload as StockMovement;
+          if (m && m.itemId === docId && !recentApplied.has(m.id)) {
+            pendingDelta += m.qtyChange;
+          }
+        }
+      }
+
+      const finalQuantity = cloudQty + pendingDelta;
+
+      // Protect pending local item edits (Change 5)
+      const pendingItemQueue = openItemQueueById.get(docId);
+      if (pendingItemQueue && pendingItemQueue.payload) {
+        const localItem = await db.items.get(docId);
+        const localUpdatedAt = localItem?.updatedAt || pendingItemQueue.payload.updatedAt || 0;
+        const cloudUpdatedAt = Number(data.updatedAt) || 0;
+        if (localUpdatedAt > cloudUpdatedAt) {
+          if (localItem) {
+            cloudItemsToPut.push({
+              ...localItem,
+              quantity: finalQuantity,
+              updatedAt: localUpdatedAt,
+            });
+            continue;
+          }
+        }
+      }
+
+      cloudItemsToPut.push({
+        ...data,
+        id: docId,
+        shopId: data.shopId || targetShopId,
+        costPrice: Number(data.costPrice) || 0,
+        sellingPrice: Number(data.sellingPrice) || 0,
+        quantity: finalQuantity,
+        archived: Boolean(data.archived),
+        updatedAt: Number(data.updatedAt) || Date.now(),
+      });
+    }
+  }
+
+  // If this is a full snapshot, remove local items that no longer exist in cloud
+  // unless they have an open item create/update in syncQueue (Change 1b #2)
+  if (options.isFullSnapshot) {
+    const localItems = await db.items.where('shopId').equals(targetShopId).toArray();
+    for (const localIt of localItems) {
+      if (!cloudIdsInSnapshot.has(localIt.id)) {
+        const hasOpenQueue = openItemQueueById.has(localIt.id);
+        if (!hasOpenQueue) {
+          await db.items.delete(localIt.id);
+          removedCount++;
+        }
+      }
+    }
+  }
+
+  if (cloudItemsToPut.length > 0) {
+    await db.items.bulkPut(cloudItemsToPut);
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+  }
+
+  return { pulled: cloudItemsToPut.length, removed: removedCount };
+}
+
 // Pull latest inventory from Cloud Firestore into local Dexie
 export async function pullInventoryFromFirestore(shopId: string): Promise<{ pulled: number; removed: number }> {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -562,77 +708,18 @@ export async function pullInventoryFromFirestore(shopId: string): Promise<{ pull
   }
 
   try {
-    const targetShopId = shopId || 'shop-electrical-01';
+    const targetShopId = shopId || SEED_SHOP_ID;
     const itemsCol = collection(firestore, 'items');
-    const snap = await getDocs(query(itemsCol, where('shopId', '==', targetShopId)));
+    const q = query(itemsCol, where('shopId', '==', targetShopId));
 
-    if (snap.empty) {
-      // Cloud has no items yet: populate Firestore from local catalog so cloud has correct stock
-      const localCount = await db.items.where('shopId').equals(targetShopId).count();
-      if (localCount > 0) {
-        await syncAllInventoryToFirestore(targetShopId, false);
-      }
-      return { pulled: 0, removed: 0 };
+    let snap;
+    try {
+      snap = await getDocsFromServer(q);
+    } catch {
+      snap = await getDocs(q);
     }
 
-    const openQueue = await db.syncQueue
-      .where('entity')
-      .equals('stockMovement')
-      .filter((q) => q.status !== 'synced')
-      .toArray();
-
-    const cloudItems: Item[] = [];
-
-    for (const d of snap.docs) {
-      const data = d.data() as Item & { isDeleted?: boolean };
-      if (data?.isDeleted) {
-        await db.items.delete(d.id);
-        continue;
-      }
-      if (data && data.name) {
-        const cloudQuantity = Number(data.quantity) || 0;
-
-        // Skip pending local movements already accounted for by the cloud
-        const recentApplied = new Set<string>();
-        if (data.lastMovementId) recentApplied.add(data.lastMovementId);
-        if (Array.isArray(data.recentMovementIds)) {
-          for (const movId of data.recentMovementIds) {
-            if (movId) recentApplied.add(movId);
-          }
-        }
-
-        let pendingDelta = 0;
-        for (const q of openQueue) {
-          const m = q.payload as StockMovement;
-          if (m && m.itemId === d.id && !recentApplied.has(m.id)) {
-            pendingDelta += m.qtyChange;
-          }
-        }
-
-        const finalQuantity = Math.max(0, cloudQuantity + pendingDelta);
-
-        cloudItems.push({
-          ...data,
-          id: d.id,
-          shopId: data.shopId || targetShopId,
-          costPrice: Number(data.costPrice) || 0,
-          sellingPrice: Number(data.sellingPrice) || 0,
-          quantity: finalQuantity,
-          archived: Boolean(data.archived),
-          updatedAt: Number(data.updatedAt) || Date.now(),
-        });
-      }
-    }
-
-    if (cloudItems.length > 0) {
-      await db.items.bulkPut(cloudItems);
-    }
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
-    }
-
-    return { pulled: cloudItems.length, removed: 0 };
+    return await applyCloudItemsToLocal(snap.docs, targetShopId, { isFullSnapshot: true });
   } catch (err) {
     console.warn('Pull inventory notice (offline fallback active):', err);
     return { pulled: 0, removed: 0 };
@@ -646,69 +733,23 @@ export function subscribeToCloudInventory(shopId: string, onChange?: () => void)
   }
 
   try {
-    const targetShopId = shopId || 'shop-electrical-01';
+    const targetShopId = shopId || SEED_SHOP_ID;
     const q = query(collection(firestore, 'items'), where('shopId', '==', targetShopId));
+    let isFirstSnapshot = true;
     const unsub = onSnapshot(
       q,
       async (snap) => {
         try {
-          if (snap.empty) return;
-
-          const openQueue = await db.syncQueue
-            .where('entity')
-            .equals('stockMovement')
-            .filter((q) => q.status !== 'synced')
-            .toArray();
-
-          const cloudItems: Item[] = [];
-
-          for (const d of snap.docs) {
-            const data = d.data() as Item & { isDeleted?: boolean };
-            if (data?.isDeleted) {
-              await db.items.delete(d.id);
-              continue;
-            }
-            if (data && data.name) {
-              const cloudQuantity = Number(data.quantity) || 0;
-
-              const recentApplied = new Set<string>();
-              if (data.lastMovementId) recentApplied.add(data.lastMovementId);
-              if (Array.isArray(data.recentMovementIds)) {
-                for (const movId of data.recentMovementIds) {
-                  if (movId) recentApplied.add(movId);
-                }
+          if (!isFirstSnapshot && typeof snap.docChanges === 'function') {
+            for (const change of snap.docChanges()) {
+              if (change.type === 'removed') {
+                await db.items.delete(change.doc.id);
               }
-
-              let pendingDelta = 0;
-              for (const q of openQueue) {
-                const m = q.payload as StockMovement;
-                if (m && m.itemId === d.id && !recentApplied.has(m.id)) {
-                  pendingDelta += m.qtyChange;
-                }
-              }
-
-              const finalQuantity = Math.max(0, cloudQuantity + pendingDelta);
-
-              cloudItems.push({
-                ...data,
-                id: d.id,
-                shopId: data.shopId || targetShopId,
-                costPrice: Number(data.costPrice) || 0,
-                sellingPrice: Number(data.sellingPrice) || 0,
-                quantity: finalQuantity,
-                archived: Boolean(data.archived),
-                updatedAt: Number(data.updatedAt) || Date.now(),
-              });
             }
           }
 
-          if (cloudItems.length > 0) {
-            await db.items.bulkPut(cloudItems);
-          }
-
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
-          }
+          await applyCloudItemsToLocal(snap.docs, targetShopId, { isFullSnapshot: isFirstSnapshot });
+          isFirstSnapshot = false;
           onChange?.();
         } catch (inner) {
           console.warn('Real-time inventory sync processing error:', inner);
@@ -731,9 +772,11 @@ export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]
   }
 
   try {
+    const targetShopId = shopId || SEED_SHOP_ID;
     const salesCol = collection(firestore, 'sales');
+    const q = query(salesCol, where('shopId', '==', targetShopId));
     const unsub = onSnapshot(
-      salesCol,
+      q,
       async (snap) => {
         try {
           const cloudSales: Sale[] = [];
@@ -744,7 +787,7 @@ export function subscribeToCloudSales(shopId?: string, onChange?: (sales: Sale[]
               const cloudSale: Sale = {
                 ...data,
                 id: saleId,
-                shopId: data.shopId || shopId || 'shop-electrical-01',
+                shopId: data.shopId || targetShopId,
                 subtotal: Number(data.subtotal) || Number(data.total) || 0,
                 total: Number(data.total) || 0,
                 status: data.status || 'completed',
@@ -781,8 +824,10 @@ export async function pullSalesFromFirestore(shopId?: string): Promise<{ pulled:
   }
 
   try {
+    const targetShopId = shopId || SEED_SHOP_ID;
     const salesCol = collection(firestore, 'sales');
-    const snap = await getDocs(salesCol);
+    const q = query(salesCol, where('shopId', '==', targetShopId));
+    const snap = await getDocs(q);
     const cloudSales: Sale[] = [];
 
     for (const d of snap.docs) {
@@ -792,7 +837,7 @@ export async function pullSalesFromFirestore(shopId?: string): Promise<{ pulled:
         const cloudSale: Sale = {
           ...data,
           id: saleId,
-          shopId: data.shopId || shopId || 'shop-electrical-01',
+          shopId: data.shopId || targetShopId,
           subtotal: Number(data.subtotal) || Number(data.total) || 0,
           total: Number(data.total) || 0,
           status: data.status || 'completed',
@@ -858,7 +903,7 @@ export async function saveItemAcrossDevices(item: Item): Promise<void> {
   }
 }
 
-// Delete an item across Dexie and Cloud Firestore
+// Delete an item across Dexie and Cloud Firestore (Soft-delete / tombstone for cross-device propagation)
 export async function deleteItemAcrossDevices(
   shopId: string,
   itemId: string,
@@ -866,12 +911,13 @@ export async function deleteItemAcrossDevices(
   userName: string
 ): Promise<void> {
   const now = Date.now();
+  const targetShopId = shopId || SEED_SHOP_ID;
   const existing = await db.items.get(itemId);
   await db.items.delete(itemId);
 
   await db.auditLogs.add({
     id: `audit-${now}-${Math.random().toString(36).substring(2, 7)}`,
-    shopId,
+    shopId: targetShopId,
     action: 'item_deleted',
     entity: 'items',
     entityId: itemId,
@@ -881,16 +927,24 @@ export async function deleteItemAcrossDevices(
     createdAt: now,
   });
 
-  if (navigator.onLine) {
+  const tombstone = {
+    id: itemId,
+    shopId: targetShopId,
+    isDeleted: true,
+    deletedAt: now,
+    updatedAt: now,
+  };
+
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
     try {
-      await deleteDoc(doc(firestore, 'items', itemId));
+      await setDoc(doc(firestore, 'items', itemId), tombstone, { merge: true });
     } catch (err) {
-      console.warn('Immediate Firestore delete failed, queued for sync:', err);
+      console.warn('Immediate Firestore delete tombstone failed, queued for sync:', err);
       await db.syncQueue.add({
         id: `sync-del-item-${itemId}-${now}`,
         entity: 'item',
         action: 'delete',
-        payload: { id: itemId },
+        payload: tombstone,
         attempts: 0,
         status: 'pending',
         createdAt: now,
@@ -901,7 +955,7 @@ export async function deleteItemAcrossDevices(
       id: `sync-del-item-${itemId}-${now}`,
       entity: 'item',
       action: 'delete',
-      payload: { id: itemId },
+      payload: tombstone,
       attempts: 0,
       status: 'pending',
       createdAt: now,
@@ -913,16 +967,48 @@ export async function deleteItemAcrossDevices(
   }
 }
 
-// Pull latest shop settings & profile from Firestore
+// Pull latest shop settings & profile from Firestore and propagate purge if applicable
 export async function pullShopFromFirestore(shopId: string): Promise<Shop | null> {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return null;
   }
   try {
-    const targetShopId = shopId || 'shop-electrical-01';
+    const targetShopId = shopId || SEED_SHOP_ID;
     const snap = await getDoc(doc(firestore, 'shops', targetShopId));
     if (snap.exists()) {
       const data = snap.data();
+
+      // Check if another device performed a purge (Change 3)
+      const cloudPurge = Number(data.lastInventoryPurgedAt) || 0;
+      const localPurgedStr = typeof localStorage !== 'undefined' ? localStorage.getItem('shopledger_last_purged_at') : null;
+      const localPurgedAt = localPurgedStr ? Number(localPurgedStr) : 0;
+      if (cloudPurge > localPurgedAt) {
+        await db.transaction('rw', [
+          db.items,
+          db.sales,
+          db.stockMovements,
+          db.customers,
+          db.customerPayments,
+          db.imports,
+          db.dailyReports,
+        ], async () => {
+          await db.items.clear();
+          await db.sales.clear();
+          await db.stockMovements.clear();
+          await db.customers.clear();
+          await db.customerPayments.clear();
+          await db.imports.clear();
+          await db.dailyReports.clear();
+        });
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('shopledger_last_purged_at', cloudPurge.toString());
+        }
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+          window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
+        }
+      }
+
       const local = await db.shops.get(targetShopId);
       const mergedShop: Shop = {
         id: targetShopId,
@@ -956,13 +1042,45 @@ export function subscribeToCloudShop(shopId: string, onChange?: (shop: Shop) => 
     return () => {};
   }
   try {
-    const targetShopId = shopId || 'shop-electrical-01';
+    const targetShopId = shopId || SEED_SHOP_ID;
     const unsub = onSnapshot(
       doc(firestore, 'shops', targetShopId),
       async (snap) => {
         try {
           if (!snap.exists()) return;
           const data = snap.data();
+
+          // Check if another device performed a purge (Change 3)
+          const cloudPurge = Number(data.lastInventoryPurgedAt) || 0;
+          const localPurgedStr = typeof localStorage !== 'undefined' ? localStorage.getItem('shopledger_last_purged_at') : null;
+          const localPurgedAt = localPurgedStr ? Number(localPurgedStr) : 0;
+          if (cloudPurge > localPurgedAt) {
+            await db.transaction('rw', [
+              db.items,
+              db.sales,
+              db.stockMovements,
+              db.customers,
+              db.customerPayments,
+              db.imports,
+              db.dailyReports,
+            ], async () => {
+              await db.items.clear();
+              await db.sales.clear();
+              await db.stockMovements.clear();
+              await db.customers.clear();
+              await db.customerPayments.clear();
+              await db.imports.clear();
+              await db.dailyReports.clear();
+            });
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem('shopledger_last_purged_at', cloudPurge.toString());
+            }
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('shopledger_inventory_updated'));
+              window.dispatchEvent(new CustomEvent('shopledger_sales_updated'));
+            }
+          }
+
           const local = await db.shops.get(targetShopId);
           const mergedShop: Shop = {
             id: targetShopId,
@@ -995,6 +1113,15 @@ export function subscribeToCloudShop(shopId: string, onChange?: (shop: Shop) => 
   }
 }
 
+// Retry all failed syncQueue items immediately (Change 4)
+export async function retryFailedSync(): Promise<{ synced: number; remaining: number }> {
+  await db.syncQueue
+    .where('status')
+    .equals('failed')
+    .modify({ status: 'pending', attempts: 0, nextRetryAt: 0, lastError: undefined });
+  return processSyncQueue();
+}
+
 // Real-time listener for staff accounts so accounts created by admin appear immediately on all devices
 export function subscribeToCloudUsers(onChange?: (users: User[]) => void): () => void {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -1019,7 +1146,7 @@ export function subscribeToCloudUsers(onChange?: (users: User[]) => void): () =>
             if (emailLower && !blockedEmails.includes(emailLower)) {
               const u: User = {
                 uid: d.id,
-                shopId: data.shopId || 'shop-electrical-01',
+                shopId: data.shopId || SEED_SHOP_ID,
                 name: data.name || emailLower.split('@')[0],
                 email: data.email,
                 role: data.role || (emailLower === 'rajifarrid@gmail.com' || emailLower === 'wisdomosborn65@gmail.com' ? 'owner' : 'seller'),

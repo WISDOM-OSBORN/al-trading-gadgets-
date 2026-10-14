@@ -60,6 +60,8 @@ export interface Item {
   isFavorite?: boolean;
   lastMovementId?: string;
   recentMovementIds?: string[];
+  isDeleted?: boolean;
+  deletedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
